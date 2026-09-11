@@ -1,0 +1,151 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Smoke: Integrated Reset (headless)",
+      "type": "process",
+      "command": "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/isaaclab.sh",
+      "args": [
+        "-p",
+        "${workspaceFolder}/scripts/smoke_test_integrated_task.py",
+        "--visualizer",
+        "none",
+        "--episodes",
+        "3",
+        "--steps-per-episode",
+        "60",
+        "--seed",
+        "7"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "OMNI_KIT_ACCEPT_EULA": "yes",
+          "ACCEPT_EULA": "Y",
+          "PYTHONUNBUFFERED": "1"
+        }
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "Smoke: Integrated IK (headless, one episode)",
+      "type": "process",
+      "command": "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/isaaclab.sh",
+      "args": [
+        "-p",
+        "${workspaceFolder}/scripts/smoke_test_integrated_task.py",
+        "--visualizer",
+        "none",
+        "--episodes",
+        "1",
+        "--steps-per-episode",
+        "1",
+        "--ik-smoke-steps",
+        "240",
+        "--seed",
+        "7"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "OMNI_KIT_ACCEPT_EULA": "yes",
+          "ACCEPT_EULA": "Y",
+          "PYTHONUNBUFFERED": "1"
+        }
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "Smoke: Integrated GUI (one episode)",
+      "type": "process",
+      "command": "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/isaaclab.sh",
+      "args": [
+        "-p",
+        "${workspaceFolder}/scripts/smoke_test_integrated_task.py",
+        "--visualizer",
+        "kit",
+        "--keep-open",
+        "--episodes",
+        "1",
+        "--steps-per-episode",
+        "300",
+        "--seed",
+        "7"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "OMNI_KIT_ACCEPT_EULA": "yes",
+          "ACCEPT_EULA": "Y",
+          "PYTHONUNBUFFERED": "1"
+        }
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "Smoke: YAM Newton only",
+      "type": "process",
+      "command": "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/isaaclab.sh",
+      "args": [
+        "-p",
+        "${workspaceFolder}/scripts/smoke_test_yam_newton.py"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "OMNI_KIT_ACCEPT_EULA": "yes",
+          "ACCEPT_EULA": "Y",
+          "PYTHONUNBUFFERED": "1"
+        }
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "Assets: Convert YAM URDF to USD",
+      "type": "process",
+      "command": "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/isaaclab.sh",
+      "args": [
+        "-p",
+        "${workspaceFolder}/scripts/convert_yam_ultra_2.py"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "OMNI_KIT_ACCEPT_EULA": "yes",
+          "ACCEPT_EULA": "Y",
+          "PYTHONUNBUFFERED": "1"
+        }
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    }
+  ]
+}

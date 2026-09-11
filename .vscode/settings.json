@@ -1,0 +1,30 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/env_isaaclab/bin/python",
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/source/yam_ultra_deformable_place",
+    "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/source/isaaclab",
+    "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/source/isaaclab_assets",
+    "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/source/isaaclab_contrib",
+    "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/source/isaaclab_newton",
+    "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/source/isaaclab_tasks"
+  ],
+  "python.analysis.typeCheckingMode": "basic",
+  "python.terminal.activateEnvironment": true,
+  "ruff.configuration": "${workspaceFolder}/pyproject.toml",
+  "editor.rulers": [120],
+  "files.exclude": {"**/__pycache__": true, "**/*.egg-info": true},
+  "files.watcherExclude": {
+    "**/.git/objects/**": true,
+    "**/__pycache__/**": true,
+    "**/*.egg-info/**": true,
+    "**/assets/generated/**": true
+  },
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.fixAll.ruff": "explicit",
+      "source.organizeImports.ruff": "explicit"
+    }
+  }
+}

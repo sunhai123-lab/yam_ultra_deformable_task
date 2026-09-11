@@ -1,0 +1,118 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Smoke: Integrated GUI (one episode)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/env_isaaclab/bin/python",
+      "program": "${workspaceFolder}/scripts/smoke_test_integrated_task.py",
+      "args": [
+        "--visualizer",
+        "kit",
+        "--keep-open",
+        "--episodes",
+        "1",
+        "--steps-per-episode",
+        "300",
+        "--seed",
+        "7"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": true,
+      "env": {
+        "OMNI_KIT_ACCEPT_EULA": "yes",
+        "ACCEPT_EULA": "Y",
+        "PYTHONUNBUFFERED": "1"
+      }
+    },
+    {
+      "name": "Smoke: Integrated Reset (headless)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/env_isaaclab/bin/python",
+      "program": "${workspaceFolder}/scripts/smoke_test_integrated_task.py",
+      "args": [
+        "--visualizer",
+        "none",
+        "--episodes",
+        "3",
+        "--steps-per-episode",
+        "60",
+        "--seed",
+        "7"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": true,
+      "env": {
+        "OMNI_KIT_ACCEPT_EULA": "yes",
+        "ACCEPT_EULA": "Y",
+        "PYTHONUNBUFFERED": "1"
+      }
+    },
+    {
+      "name": "Smoke: Integrated IK (headless, one episode)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/env_isaaclab/bin/python",
+      "program": "${workspaceFolder}/scripts/smoke_test_integrated_task.py",
+      "args": [
+        "--visualizer",
+        "none",
+        "--episodes",
+        "1",
+        "--steps-per-episode",
+        "1",
+        "--ik-smoke-steps",
+        "240",
+        "--seed",
+        "7"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": true,
+      "env": {
+        "OMNI_KIT_ACCEPT_EULA": "yes",
+        "ACCEPT_EULA": "Y",
+        "PYTHONUNBUFFERED": "1"
+      }
+    },
+    {
+      "name": "Smoke: YAM Newton only",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/env_isaaclab/bin/python",
+      "program": "${workspaceFolder}/scripts/smoke_test_yam_newton.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": true,
+      "env": {
+        "OMNI_KIT_ACCEPT_EULA": "yes",
+        "ACCEPT_EULA": "Y",
+        "PYTHONUNBUFFERED": "1"
+      }
+    },
+    {
+      "name": "Python: Current File (Isaac Lab)",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/env_isaaclab/bin/python",
+      "program": "${file}",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": true,
+      "env": {
+        "OMNI_KIT_ACCEPT_EULA": "yes",
+        "ACCEPT_EULA": "Y",
+        "PYTHONUNBUFFERED": "1"
+      }
+    }
+  ]
+}
