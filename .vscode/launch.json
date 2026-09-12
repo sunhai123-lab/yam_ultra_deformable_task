@@ -2,7 +2,7 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Smoke: Integrated GUI (one episode)",
+      "name": "Task: Physical grasp GUI (one episode)",
       "type": "debugpy",
       "request": "launch",
       "python": "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/env_isaaclab/bin/python",
@@ -19,7 +19,7 @@
         "--motion-steps",
         "240",
         "--lift-height",
-        "0.4",
+        "0.05",
         "--seed",
         "7"
       ],
@@ -60,7 +60,7 @@
       }
     },
     {
-      "name": "Task: Pick and lift 0.4 m (headless)",
+      "name": "Task: Physical pick and lift 0.05 m (headless)",
       "type": "debugpy",
       "request": "launch",
       "python": "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/env_isaaclab/bin/python",
@@ -76,7 +76,7 @@
         "--motion-steps",
         "240",
         "--lift-height",
-        "0.4",
+        "0.05",
         "--seed",
         "7"
       ],

@@ -14,7 +14,7 @@
     "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/env_isaaclab/lib/python3.12/site-packages",
     "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/env_isaaclab/lib/python3.12/site-packages/cmeel.prefix/lib/python3.12/site-packages"
   ],
-  "python.analysis.typeCheckingMode": "off",
+  "python.analysis.typeCheckingMode": "basic",
   "python.analysis.diagnosticMode": "openFilesOnly",
   "python.analysis.autoSearchPaths": true,
   "python.analysis.useLibraryCodeForTypes": true,
@@ -34,5 +34,6 @@
     "editor.defaultFormatter": "ms-python.black-formatter",
     "editor.formatOnSave": true,
     "editor.codeActionsOnSave": {}
-  }
+  },
+  "python.analysis.diagnosticSeverityOverrides": {}
 }

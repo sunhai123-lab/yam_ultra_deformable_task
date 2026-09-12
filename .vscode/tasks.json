@@ -33,7 +33,7 @@
       }
     },
     {
-      "label": "Task: Pick and lift 0.4 m (headless)",
+      "label": "Task: Physical pick and lift 0.05 m (headless)",
       "type": "process",
       "command": "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/isaaclab.sh",
       "args": [
@@ -49,7 +49,7 @@
         "--motion-steps",
         "240",
         "--lift-height",
-        "0.4",
+        "0.05",
         "--seed",
         "7"
       ],
@@ -69,7 +69,7 @@
       }
     },
     {
-      "label": "Smoke: Integrated GUI (one episode)",
+      "label": "Task: Physical grasp GUI (one episode)",
       "type": "process",
       "command": "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/isaaclab.sh",
       "args": [
@@ -86,7 +86,7 @@
         "--motion-steps",
         "240",
         "--lift-height",
-        "0.4",
+        "0.05",
         "--seed",
         "7"
       ],
