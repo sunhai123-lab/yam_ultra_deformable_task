@@ -7,10 +7,10 @@
 1. 在桌面可达区域随机化方块和球的位置；
 2. 使用项目内基于 URDF 的正运动学、雅可比矩阵和 DLS 逆运动学移动夹爪；
 3. 夹爪依次执行预抓取、下降、闭合和抬升；
-4. 使用原始夹指碰撞网格与软球产生法向接触和 Coulomb 摩擦；
+4. 使用原始夹指网格的凸分解与软球产生法向接触和 Coulomb 摩擦；
 5. 通过有限值、FK 对齐误差和球心实际抬升量判断测试是否成功。
 
-保留原始 YAM 视觉与碰撞资产，不添加夹指板，不使用节点绑定。
+不修改磁盘上的 YAM 资产；仅在运行时覆盖夹指碰撞近似，不添加夹指板，不使用节点绑定。
 开合方向由原始指尖内侧几何验证；接触与完整抓取尚需分阶段运行验收。
 """
 
@@ -32,7 +32,9 @@ parser.add_argument(
 )
 parser.add_argument("--seed", type=int, default=7, help="物体位置随机化使用的可复现随机种子。")
 parser.add_argument("--pick-lift", action="store_true", help="执行硬编码抓取和抬升流程。")
-parser.add_argument("--motion-steps", type=int, default=240, help="每个机械臂运动阶段使用的物理步数。")
+parser.add_argument(
+    "--motion-steps", type=int, default=240, help="运动时间倍率基准：240=默认速度，480=半速；不再是每阶段固定步数。"
+)
 parser.add_argument("--lift-height", type=float, default=0.03, help="球心期望沿世界 Z 轴抬升的距离，单位 m。")
 parser.add_argument("--keep-open", action="store_true", help="测试结束后保持 Kit GUI，直到手动关闭窗口。")
 parser.add_argument("--stop-after-hold", action="store_true", help="只验收到闭合保持阶段，不抬升。")
@@ -44,6 +46,7 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 import torch
+from pxr import Usd, UsdPhysics
 from isaaclab_newton.assets import Articulation, RigidObject
 from isaaclab_newton.physics import MJWarpSolverCfg, NewtonCfg
 from isaaclab_newton.sim.schemas import NewtonDeformableBodyPropertiesCfg, NewtonMaterialPropertiesCfg
@@ -106,6 +109,9 @@ LEFT_TIP_PATH = "/World/env_0/Robot/Geometry/base/link1/link2/link3/link4/link5/
 RIGHT_TIP_PATH = "/World/env_0/Robot/Geometry/base/link1/link2/link3/link4/link5/gripper/tip_right"
 
 GRIPPER_OPEN_POSITION = -0.04695
+GRIPPER_COMMAND_SPEED = 0.04  # 空载单指速度 m/s；全行程约 1.2 秒仿真时间。
+GRIPPER_CONTACT_SPEED = 0.01  # 接触闭合独立限速，不与空载诊断共用。
+ARM_CARTESIAN_SPEED = 0.10  # m/s，原 0.5 mm/step 相当于 0.06 m/s。
 GRIPPER_CLOSED_GAP = 0.00006211
 GRIPPER_OPEN_GAP = GRIPPER_CLOSED_GAP - 2.0 * GRIPPER_OPEN_POSITION
 NOMINAL_GRIP_STRESS = 5.0e3
@@ -215,13 +221,21 @@ def spawn_scene() -> tuple[Articulation, RigidObject, DeformableObject]:
             "gripper": ImplicitActuatorCfg(
                 joint_names_expr=["joint[7-8]"],
                 effort_limit_sim=15.0,
-                velocity_limit_sim=0.01,
+                velocity_limit_sim=0.05,
                 stiffness=1000.0,
                 damping=50.0,
             ),
         },
     )
     robot = Articulation(robot_cfg)
+    # 对原始三角表面做凸分解，不把有凹部的整根夹指填成单一凸包。
+    # 只覆盖当前场景的碰撞近似属性；不改资产文件、视觉顶点或增加碰撞板。
+    sim_utils.make_uninstanceable("/World/env_0/Robot")
+    stage = sim_utils.get_current_stage()
+    for tip_path in (LEFT_TIP_PATH, RIGHT_TIP_PATH):
+        for prim in Usd.PrimRange(stage.GetPrimAtPath(tip_path)):
+            if prim.HasAPI(UsdPhysics.MeshCollisionAPI):
+                UsdPhysics.MeshCollisionAPI(prim).GetApproximationAttr().Set("convexDecomposition")
 
     block = RigidObject(
         RigidObjectCfg(
@@ -471,8 +485,9 @@ def wait_until_scene_settled(
             stable_centers.append(ball_now[:2])
             if len(stable_centers) > SCENE_SETTLE_REQUIRED_STEPS:
                 stable_centers.pop(0)
-            drift = sum((max(p[i] for p in stable_centers) - min(p[i] for p in stable_centers)) ** 2
-                        for i in (0, 1)) ** 0.5
+            drift = (
+                sum((max(p[i] for p in stable_centers) - min(p[i] for p in stable_centers)) ** 2 for i in (0, 1)) ** 0.5
+            )
             if drift > BALL_SETTLE_WINDOW_DRIFT:
                 stable_centers = [ball_now[:2]]
                 stable_steps = 0
@@ -543,7 +558,7 @@ def grasp_point_kinematics(root_pose_w, arm_pos):
 
 
 def move_grasp_point(
-    sim, robot, block, ball, target_pos_w, gripper_target, num_steps, maintain_orientation=True, target_rotation_w=None
+    sim, robot, block, ball, target_pos_w, gripper_target, maintain_orientation=True, target_rotation_w=None
 ):
     ee_body_idx = robot.body_names.index("gripper")
     limits = robot.data.joint_pos_limits.torch[0, :6]
@@ -554,8 +569,17 @@ def move_grasp_point(
         else target_rotation_w
     )
     _, _, start_pos, _ = grasp_point_kinematics(robot.data.root_link_pose_w.torch, robot.data.joint_pos.torch[:, :6])
-    travel_steps = max(num_steps, int(torch.linalg.vector_norm(target_pos_w - start_pos).item() / 0.0005) + 1)
-    for step in range(travel_steps + 60):
+    travel_steps = max(
+        1,
+        int(
+            torch.linalg.vector_norm(target_pos_w - start_pos).item()
+            / (ARM_CARTESIAN_SPEED * sim.get_physics_dt())
+            * args_cli.motion_steps
+            / 240
+        )
+        + 1,
+    )
+    for step in range(travel_steps + 30):
         waypoint = start_pos + min(1.0, (step + 1) / travel_steps) * (target_pos_w - start_pos)
         root_pose_w = robot.data.root_link_pose_w.torch
         arm_pos = robot.data.joint_pos.torch[:, :6]
@@ -603,10 +627,22 @@ def solve_approach_joint_target(robot, target_pos_w, target_rotation_w, iteratio
     )
 
 
-def execute_arm_trajectory(sim, robot, block, ball, target_arm_pos, gripper_target, num_steps):
+def execute_arm_trajectory(sim, robot, block, ball, target_arm_pos, gripper_target):
     start_arm_pos = robot.data.joint_pos.torch[:, :6].clone()
-    for step in range(num_steps):
-        phase = (step + 1) / num_steps
+    # 三次曲线峰值速度为平均速度的 1.5 倍；空载关节峰值限制为 1 rad/s。
+    steps = max(
+        30,
+        int(
+            1.5
+            * (target_arm_pos - start_arm_pos).abs().max().item()
+            / sim.get_physics_dt()
+            * args_cli.motion_steps
+            / 240
+        )
+        + 1,
+    )
+    for step in range(steps):
+        phase = (step + 1) / steps
         alpha = phase * phase * (3.0 - 2.0 * phase)
         full_target = robot.data.joint_pos.torch.clone()
         full_target[:, :6] = start_arm_pos + alpha * (target_arm_pos - start_arm_pos)
@@ -614,9 +650,13 @@ def execute_arm_trajectory(sim, robot, block, ball, target_arm_pos, gripper_targ
         step_scene(sim, robot, block, ball, full_target)
 
 
-def hold_grasp(sim, robot, block, ball, target_pos_w, gripper_start, gripper_end, num_steps, target_rotation_w):
-    target = robot.data.joint_pos.torch.clone()
-    steps = max(num_steps, int(abs(gripper_end - gripper_start) / (0.005 * sim.get_physics_dt())) + 1)
+def hold_grasp(sim, robot, block, ball, gripper_start, gripper_end):
+    # 保留最后的驱动目标；实际关节角含重力/接触造成的跟踪误差，不能当成保持目标。
+    target = robot.data.joint_pos_target.torch.clone()
+    speed = GRIPPER_COMMAND_SPEED if args_cli.gripper_check else GRIPPER_CONTACT_SPEED
+    steps = max(
+        1, int(abs(gripper_end - gripper_start) / (speed * sim.get_physics_dt()) * args_cli.motion_steps / 240) + 1
+    )
     for step in range(steps):
         target[:, 6:] = gripper_start + (gripper_end - gripper_start) * (step + 1) / steps
         step_scene(sim, robot, block, ball, target)
@@ -626,10 +666,10 @@ def check_gripper_motion(sim, robot, block, ball):
     print("STATE=GRIPPER_CHECK", flush=True)
     gaps = []
     for start, end in ((GRIPPER_OPEN_POSITION, 0.0), (0.0, GRIPPER_OPEN_POSITION)):
-        hold_grasp(sim, robot, block, ball, ball_center(ball), start, end, 240, None)
-        target = robot.data.joint_pos.torch.clone()
+        hold_grasp(sim, robot, block, ball, start, end)
+        target = robot.data.joint_pos_target.torch.clone()
         target[:, 6:] = end
-        for _ in range(120):
+        for _ in range(30):
             step_scene(sim, robot, block, ball, target)
         gap, _ = grasp_geometry_metrics(robot, ball)
         gaps.append(gap)
@@ -648,7 +688,7 @@ def check_ball_in_gripper(robot, ball):
         raise RuntimeError("FAILURE: excessive deformation")
 
 
-def pick_and_lift_ball(sim, robot, block, ball, initial_ball_pos, motion_steps, lift_height):
+def pick_and_lift_ball(sim, robot, block, ball, initial_ball_pos, lift_height):
     print("STATE=PRE_GRASP", flush=True)
     device = robot.device
     dtype = robot.data.joint_pos.torch.dtype
@@ -663,14 +703,15 @@ def pick_and_lift_ball(sim, robot, block, ball, initial_ball_pos, motion_steps, 
         raise RuntimeError(
             f"Pregrasp IK did not converge: position_error={solved_position_error:.6f}, rotation_error={solved_rotation_error:.6f}"
         )
-    execute_arm_trajectory(sim, robot, block, ball, pregrasp_joint_target, GRIPPER_OPEN_POSITION, motion_steps)
+    execute_arm_trajectory(sim, robot, block, ball, pregrasp_joint_target, GRIPPER_OPEN_POSITION)
 
     # 机械臂到球上方后重新确认沉降完成；使用保持命令，不重置球或清零节点速度。
-    approach_hold = robot.data.joint_pos.torch.clone()
+    approach_hold = robot.data.joint_pos_target.torch.clone()
     approach_hold[:, :6] = pregrasp_joint_target
     approach_hold[:, 6:] = GRIPPER_OPEN_POSITION
-    wait_until_scene_settled(sim, robot, block, ball, approach_hold,
-                            episode=0, minimum_steps=30, ball_reset_center=initial_ball_pos)
+    wait_until_scene_settled(
+        sim, robot, block, ball, approach_hold, episode=0, minimum_steps=30, ball_reset_center=initial_ball_pos
+    )
 
     tracked_pregrasp_target = ball_center(ball).clone() + pregrasp_offset
     tracked_joint_target, solved_position_error, solved_rotation_error = solve_approach_joint_target(
@@ -680,9 +721,7 @@ def pick_and_lift_ball(sim, robot, block, ball, initial_ball_pos, motion_steps, 
         raise RuntimeError(
             f"Tracked pregrasp IK did not converge: position_error={solved_position_error:.6f}, rotation_error={solved_rotation_error:.6f}"
         )
-    execute_arm_trajectory(
-        sim, robot, block, ball, tracked_joint_target, GRIPPER_OPEN_POSITION, max(60, motion_steps // 2)
-    )
+    execute_arm_trajectory(sim, robot, block, ball, tracked_joint_target, GRIPPER_OPEN_POSITION)
     _, _, actual_pregrasp_pos_w, _ = grasp_point_kinematics(
         robot.data.root_link_pose_w.torch, robot.data.joint_pos.torch[:, :6]
     )
@@ -715,7 +754,6 @@ def pick_and_lift_ball(sim, robot, block, ball, initial_ball_pos, motion_steps, 
         ball,
         grasp_target,
         GRIPPER_OPEN_POSITION,
-        motion_steps,
         target_rotation_w=approach_rotation_w,
     )
     print(
@@ -735,11 +773,8 @@ def pick_and_lift_ball(sim, robot, block, ball, initial_ball_pos, motion_steps, 
         robot,
         block,
         ball,
-        grasp_target,
         GRIPPER_OPEN_POSITION,
         GRIPPER_GRASP_POSITION,
-        max(60, motion_steps // 2),
-        approach_rotation_w,
     )
     print(
         f"PICK_LIFT_STAGE=closed ball_center={ball_center(ball)[0].cpu().tolist()} finger_joints={robot.data.joint_pos.torch[0, 6:].cpu().tolist()}",
@@ -751,7 +786,7 @@ def pick_and_lift_ball(sim, robot, block, ball, initial_ball_pos, motion_steps, 
         f"PHYSICAL_GRASP target_gap_m={GRIPPER_TARGET_GAP:.6f} measured_gap_m={measured_gap:.6f} ball_width_on_grasp_axis_m={ball_width_after_grasp:.6f}",
         flush=True,
     )
-    closed_target = robot.data.joint_pos.torch.clone()
+    closed_target = robot.data.joint_pos_target.torch.clone()
     closed_target[:, 6:] = GRIPPER_GRASP_POSITION
     print("STATE=HOLD", flush=True)
     for _ in range(120):
@@ -775,13 +810,12 @@ def pick_and_lift_ball(sim, robot, block, ball, initial_ball_pos, motion_steps, 
         ball,
         lift_target,
         GRIPPER_GRASP_POSITION,
-        motion_steps * 2,
         target_rotation_w=approach_rotation_w,
     )
     print(
         f"PICK_LIFT_STAGE=lift error_m={lift_error:.6f} ball_center={ball_center(ball)[0].cpu().tolist()}", flush=True
     )
-    final_target = robot.data.joint_pos.torch.clone()
+    final_target = robot.data.joint_pos_target.torch.clone()
     final_target[:, 6:] = GRIPPER_GRASP_POSITION
     for _ in range(120):
         step_scene(sim, robot, block, ball, final_target)
@@ -852,9 +886,7 @@ def main() -> None:
             check_gripper_motion(sim, robot, block, ball)
         if args_cli.pick_lift:
             settled_ball_pos = tuple(ball_center(ball)[0].cpu().tolist())
-            pick_lift_result = pick_and_lift_ball(
-                sim, robot, block, ball, settled_ball_pos, args_cli.motion_steps, args_cli.lift_height
-            )
+            pick_lift_result = pick_and_lift_ball(sim, robot, block, ball, settled_ball_pos, args_cli.lift_height)
 
         check_block_support(block, stage=f"episode_{episode}_complete")
         check_ball_support(ball, stage=f"episode_{episode}_complete", reset_center=ball_reset_center)
@@ -909,7 +941,7 @@ def main() -> None:
         if args_cli.headless:
             raise ValueError("--keep-open requires the Kit visualizer; use --visualizer kit.")
         print("GUI_READY_CLOSE_WINDOW_TO_EXIT", flush=True)
-        hold_target = robot.data.joint_pos.torch.clone()
+        hold_target = robot.data.joint_pos_target.torch.clone()
         while simulation_app.is_running():
             step_scene(sim, robot, block, ball, hold_target)
 
