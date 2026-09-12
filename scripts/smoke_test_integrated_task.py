@@ -87,6 +87,9 @@ BALL_YOUNGS_MODULUS = 5.0e4
 BALL_POISSONS_RATIO = 0.35
 BALL_PARTICLE_RADIUS = 0.006
 BALL_RESET_CLEARANCE = 5.0e-4
+BALL_INTERNAL_DAMPING = 0.01
+# 允许重力沉降，但只有连续窗口内横向漂移小于 0.25 mm 才开始接近。
+BALL_SETTLE_WINDOW_DRIFT = 2.5e-4
 BALL_SETTLE_ROOT_SPEED = 1.0e-3
 BALL_SETTLE_MAX_NODAL_SPEED = 1.0e-2
 BALL_SETTLE_CONTACT_CLEARANCE = 1.5e-3
@@ -132,7 +135,7 @@ def make_sim() -> SimulationContext:
             ccd_iterations=100,
         ),
         soft_solver_cfg=VBDSolverCfg(
-            iterations=10,
+            iterations=20,
             integrate_with_external_rigid_solver=True,
             particle_enable_self_contact=False,
             particle_collision_detection_interval=-1,
@@ -250,7 +253,7 @@ def spawn_scene() -> tuple[Articulation, RigidObject, DeformableObject]:
                         * BALL_POISSONS_RATIO
                         / ((1.0 + BALL_POISSONS_RATIO) * (1.0 - 2.0 * BALL_POISSONS_RATIO))
                     ),
-                    k_damp=1.0e3,
+                    k_damp=BALL_INTERNAL_DAMPING,
                     particle_radius=BALL_PARTICLE_RADIUS,
                 ),
             ),
@@ -432,21 +435,23 @@ def step_scene(sim, robot, block, ball, joint_target) -> None:
     robot.update(dt)
     block.update(dt)
     ball.update(dt)
-    for value in (
-        robot.data.joint_pos.torch,
-        robot.data.joint_vel.torch,
-        block.data.root_pos_w.torch,
-        block.data.root_com_vel_w.torch,
-        ball.data.nodal_state_w.torch,
+    for name, value in (
+        ("robot_joint_positions", robot.data.joint_pos.torch),
+        ("robot_joint_velocities", robot.data.joint_vel.torch),
+        ("block_position", block.data.root_pos_w.torch),
+        ("block_velocity", block.data.root_com_vel_w.torch),
+        ("ball_nodes", ball.data.nodal_state_w.torch),
     ):
         if not torch.isfinite(value).all():
-            raise RuntimeError("FAILURE: non-finite simulation state")
+            invalid = (~torch.isfinite(value)).nonzero()[:8].cpu().tolist()
+            raise RuntimeError(f"FAILURE: non-finite {name}; first_indices={invalid}")
 
 
 def wait_until_scene_settled(
     sim, robot, block, ball, joint_target, *, episode: int, minimum_steps: int, ball_reset_center
 ) -> int:
     stable_steps = 0
+    stable_centers = []
     timeout_steps = max(SCENE_SETTLE_TIMEOUT_STEPS, minimum_steps + SCENE_SETTLE_REQUIRED_STEPS)
     for step_index in range(timeout_steps):
         step_scene(sim, robot, block, ball, joint_target)
@@ -463,9 +468,18 @@ def wait_until_scene_settled(
             )
 
         if block_state_is_settled(bc, blv, bav, bot) and ball_state_is_settled(ball):
+            stable_centers.append(ball_now[:2])
+            if len(stable_centers) > SCENE_SETTLE_REQUIRED_STEPS:
+                stable_centers.pop(0)
+            drift = sum((max(p[i] for p in stable_centers) - min(p[i] for p in stable_centers)) ** 2
+                        for i in (0, 1)) ** 0.5
+            if drift > BALL_SETTLE_WINDOW_DRIFT:
+                stable_centers = [ball_now[:2]]
+                stable_steps = 0
             stable_steps += 1
         else:
             stable_steps = 0
+            stable_centers.clear()
 
         if step_count in SCENE_DIAGNOSTIC_STEPS or step_count == minimum_steps:
             stage = f"episode_{episode}_settling_step_{step_count}"
@@ -635,6 +649,7 @@ def check_ball_in_gripper(robot, ball):
 
 
 def pick_and_lift_ball(sim, robot, block, ball, initial_ball_pos, motion_steps, lift_height):
+    print("STATE=PRE_GRASP", flush=True)
     device = robot.device
     dtype = robot.data.joint_pos.torch.dtype
     initial_ball_target = torch.tensor((initial_ball_pos,), device=device, dtype=dtype)
@@ -649,6 +664,13 @@ def pick_and_lift_ball(sim, robot, block, ball, initial_ball_pos, motion_steps, 
             f"Pregrasp IK did not converge: position_error={solved_position_error:.6f}, rotation_error={solved_rotation_error:.6f}"
         )
     execute_arm_trajectory(sim, robot, block, ball, pregrasp_joint_target, GRIPPER_OPEN_POSITION, motion_steps)
+
+    # 机械臂到球上方后重新确认沉降完成；使用保持命令，不重置球或清零节点速度。
+    approach_hold = robot.data.joint_pos.torch.clone()
+    approach_hold[:, :6] = pregrasp_joint_target
+    approach_hold[:, 6:] = GRIPPER_OPEN_POSITION
+    wait_until_scene_settled(sim, robot, block, ball, approach_hold,
+                            episode=0, minimum_steps=30, ball_reset_center=initial_ball_pos)
 
     tracked_pregrasp_target = ball_center(ball).clone() + pregrasp_offset
     tracked_joint_target, solved_position_error, solved_rotation_error = solve_approach_joint_target(
@@ -679,8 +701,10 @@ def pick_and_lift_ball(sim, robot, block, ball, initial_ball_pos, motion_steps, 
     if pregrasp_error > 0.005:
         raise RuntimeError(f"FAILURE PRE_GRASP: tracking error {pregrasp_error}")
     gap, width = grasp_geometry_metrics(robot, ball)
-    if gap < width + 0.005:
-        raise RuntimeError(f"FAILURE OPEN: gap={gap}, width={width}")
+    # 软体接触包络包含两侧 particle_radius，不能只按可视网格宽度判断能否进入。
+    required_gap = width + 2 * BALL_PARTICLE_RADIUS + 0.001
+    if gap < required_gap:
+        raise RuntimeError(f"FAILURE OPEN: gap={gap}, required_contact_envelope={required_gap}")
 
     print("STATE=DESCEND", flush=True)
     grasp_target = ball_center(ball).clone()
@@ -700,6 +724,9 @@ def pick_and_lift_ball(sim, robot, block, ball, initial_ball_pos, motion_steps, 
     print(f"FINGER_SURFACE_POINTS_OPEN={finger_surface_points(robot).cpu().tolist()}", flush=True)
     if grasp_error > 0.005:
         raise RuntimeError(f"FAILURE DESCEND: tracking error {grasp_error}")
+    lateral_error = torch.linalg.vector_norm(ball_center(ball)[0, :2] - grasp_target[0, :2]).item()
+    if lateral_error > 0.003:
+        raise RuntimeError(f"FAILURE DESCEND: ball moved sideways {lateral_error:.6f} m; do not close off-center")
     check_ball_in_gripper(robot, ball)
 
     print("STATE=CLOSE_GRIPPER", flush=True)
@@ -843,6 +870,7 @@ def main() -> None:
 
         measured_block = block.data.root_pos_w.torch[0].cpu().tolist()
         measured_ball = ball.data.nodal_pos_w.torch[0].mean(dim=0).cpu().tolist()
+        # 这是整次流程位移，包含抓取；不能当作纯初始化漂移。
         ball_xy_drift = (
             (measured_ball[0] - ball_reset_center[0]) ** 2 + (measured_ball[1] - ball_reset_center[1]) ** 2
         ) ** 0.5
