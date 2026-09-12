@@ -8,6 +8,22 @@
 
 开口公式：gap ≈ 0.00006211 - q7 - q8。q7=q8=-0.04695 时净开口约 93.96 mm；q=0 为闭合。真实夹持中心选 gripper frame z=-0.125 m，对齐指尖直段，所有测量点仅用于诊断，不生成几何。
 
+## Reset / scene settling 修正
+
+刚体方块继续保持动态 `RigidObject`，每个 episode 继续随机初始化；桌面与方块使用显式普通刚体材料，方块只在桌面上方保留 0.5 mm reset clearance。
+
+软球不再按视觉半径固定悬空 12 mm 后自由落下。reset 时直接读取默认 VBD nodal state：先对齐随机 XY，再把最低 simulation node 放到 `table_top + particle_radius + 0.5 mm`。这样初始化高度与实际 tet mesh / particle contact 几何一致，减少首次接触弹跳和滚动造成的随机位置偏移。
+
+进入任务前使用统一 scene settling 门控，同时要求：
+
+- 方块线速度 < 0.5 mm/s、角速度 < 0.01 rad/s、支撑间隙在 ±1 mm 内；
+- 软球平均节点速度 < 1 mm/s；
+- 软球最大单节点速度 < 10 mm/s，用于捕获内部形变振荡；
+- 软球最低节点减去 particle radius 后的接触表面与桌面间隙在 ±1.5 mm 内；
+- 方块和软球连续 30 个 physics steps 同时满足条件才进入抓取；默认最长等待约 4 s。
+
+诊断输出增加 `BALL_SUPPORT`，记录球心、contact clearance、root velocity、max nodal speed、XY drift 和是否仍在桌面有效区域。此阶段只增加诊断和初始化/稳定门控，暂不调整 Young's modulus 或 VBD material damping；需要先用运行日志区分整体滚动、垂直弹跳和内部节点振荡。
+
 ## 实施与验证顺序
 
 1. `--gripper-check --episodes 1`：固定机械臂，原始夹指张开→闭合→张开。输出实际关节位置和真实表面间距。闭合间隙应小于 5 mm，张开应大于 85 mm。F5 默认项和 Ctrl+Shift+B 先执行此项。
@@ -27,4 +43,4 @@
 
 ## 验证边界
 
-本次以原始网格和 USD 关节变换核对开合方向，并进行语法/配置检查。尚未运行修改后的 GPU 接触/抓起验收，也未验证随机成功率；旧版 37.84 mm 数据来自额外碰撞板，不能用于证明原始夹爪抓取成功。
+本次以原始网格和 USD 关节变换核对开合方向，并进行语法/配置检查。刚体方块 resting contact 已通过多 episode reset 诊断验证；新的软球 node-aware reset 与 scene settling 仍需在 GPU/Newton 运行环境中验证。旧版 37.84 mm 数据来自额外碰撞板，不能用于证明原始夹爪抓取成功。
