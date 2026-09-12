@@ -250,6 +250,7 @@ def spawn_scene() -> tuple[Articulation, RigidObject, DeformableObject]:
                         * BALL_POISSONS_RATIO
                         / ((1.0 + BALL_POISSONS_RATIO) * (1.0 - 2.0 * BALL_POISSONS_RATIO))
                     ),
+                    k_damp=1.0e3,
                     particle_radius=BALL_PARTICLE_RADIUS,
                 ),
             ),

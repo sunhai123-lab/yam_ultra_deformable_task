@@ -27,9 +27,11 @@ fix/rigid-block-stability
 ### 2.1 上传全部修改
 
 ```bash
-git add .
-git commit -m "update simulation"
+git add -A
+git commit -m "update"
 git push
+
+git pull
 ```
 
 其中：
