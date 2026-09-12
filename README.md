@@ -65,6 +65,8 @@ OMNI_KIT_ACCEPT_EULA=yes ACCEPT_EULA=Y \
 
 The previous physical-grasp success claim is withdrawn: it used added collision plates with an incorrect open/close convention. The script now uses the original robot collision meshes and no added plates. q=-0.04695 opens the fingers; q=0 closes them.
 
-Ctrl+Shift+B and the first F5 entry now run the isolated original-gripper open/close diagnostic, not a grasp. The headless grasp entry commands 3 cm. Contact stability and lift with the original fingers remain unverified.
+The reset path now treats both the dynamic target block and the deformable ball as physical objects that must settle before the task starts. The block uses explicit rigid material properties and a 0.5 mm reset clearance. The deformable ball is placed from its actual lowest simulation node plus particle radius instead of being dropped from a fixed 12 mm height. Reset diagnostics report block velocity as well as deformable-ball center velocity, maximum nodal velocity, contact clearance, and XY drift; the episode continues only after both objects remain within settle thresholds for consecutive physics steps.
+
+Ctrl+Shift+B and the first F5 entry run the isolated original-gripper open/close diagnostic, not a grasp. The headless grasp entry commands 3 cm. Contact stability and lift with the original fingers remain unverified.
 
 See [the revised plan](docs/grasp_revision_plan.md) for geometric evidence, staged commands, acceptance criteria, and limitations. For close/hold only use --pick-lift --stop-after-hold --episodes 1; for the isolated open/close diagnostic use --gripper-check --episodes 1.
