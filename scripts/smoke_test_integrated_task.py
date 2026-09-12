@@ -28,7 +28,7 @@ parser.add_argument(
     "--steps-per-episode",
     type=int,
     default=30,
-    help="每次复位后至少推进的物理步数；随后继续等待动态方块满足稳定判据。",
+    help="每次复位后至少推进的物理步数；随后继续等待刚体方块和软球同时满足稳定判据。",
 )
 parser.add_argument("--seed", type=int, default=7, help="物体位置随机化使用的可复现随机种子。")
 parser.add_argument("--pick-lift", action="store_true", help="执行硬编码抓取和抬升流程。")
@@ -77,18 +77,24 @@ RIGID_STATIC_FRICTION = 0.6
 RIGID_DYNAMIC_FRICTION = 0.5
 RIGID_RESTITUTION = 0.0
 
-# 动态方块进入任务前必须真正静止，而不是仅固定等待若干步。
-BLOCK_SETTLE_LINEAR_SPEED = 5.0e-4  # m/s
-BLOCK_SETTLE_ANGULAR_SPEED = 1.0e-2  # rad/s
-BLOCK_SETTLE_CLEARANCE = 1.0e-3  # m
-BLOCK_SETTLE_REQUIRED_STEPS = 30
-BLOCK_SETTLE_TIMEOUT_STEPS = 360  # 120 Hz 下约 3 s；若最小等待更长会自动扩展
-BLOCK_DIAGNOSTIC_STEPS = (30, 60, 120, 240)
+BLOCK_SETTLE_LINEAR_SPEED = 5.0e-4
+BLOCK_SETTLE_ANGULAR_SPEED = 1.0e-2
+BLOCK_SETTLE_CLEARANCE = 1.0e-3
 
 BALL_RADIUS = 0.04
 BALL_DENSITY = 500.0
 BALL_YOUNGS_MODULUS = 5.0e4
 BALL_POISSONS_RATIO = 0.35
+BALL_PARTICLE_RADIUS = 0.006
+BALL_RESET_CLEARANCE = 5.0e-4
+BALL_SETTLE_ROOT_SPEED = 1.0e-3
+BALL_SETTLE_MAX_NODAL_SPEED = 1.0e-2
+BALL_SETTLE_CONTACT_CLEARANCE = 1.5e-3
+
+SCENE_SETTLE_REQUIRED_STEPS = 30
+SCENE_SETTLE_TIMEOUT_STEPS = 480
+SCENE_DIAGNOSTIC_STEPS = (30, 60, 120, 240, 360)
+
 GRASP_POINT_LOCAL = (0.0, 0.0, -0.125)
 GRASP_ROTATION_W = ((-1.0, 0.0, 0.0), (0.0, -1.0, 0.0), (0.0, 0.0, 1.0))
 LEFT_PAD_LOCAL_POS = (0.014, 0.0469184183, -0.1980911)
@@ -110,13 +116,10 @@ APPROACH_IK_SEED = (-0.48, 1.97, 1.63, -1.23, 0.0, -0.48)
 
 @configclass
 class DeformableNewtonCfg(NewtonCfg):
-    """为耦合管理器补充软体接触模型参数。"""
-
     model_cfg: NewtonModelCfg | None = None
 
 
 def make_sim() -> SimulationContext:
-    """创建 MJWarp 刚体/关节系统与 VBD 软体双向耦合的 Newton 仿真。"""
     solver_cfg = CoupledMJWarpVBDSolverCfg(
         rigid_solver_cfg=MJWarpSolverCfg(
             njmax=256,
@@ -143,7 +146,6 @@ def make_sim() -> SimulationContext:
             physics=DeformableNewtonCfg(
                 solver_cfg=solver_cfg,
                 model_cfg=NewtonModelCfg(
-                    # 仅保留软体接触参数，避免全局 shape_material_* 污染刚体接触。
                     soft_contact_ke=1.0e4,
                     soft_contact_kd=1.0e-5,
                     soft_contact_mu=5.0,
@@ -156,7 +158,6 @@ def make_sim() -> SimulationContext:
 
 
 def rigid_surface_material() -> NewtonMaterialPropertiesCfg:
-    """为桌面和目标方块创建普通、无弹性的 Newton 刚体表面材料。"""
     return NewtonMaterialPropertiesCfg(
         static_friction=RIGID_STATIC_FRICTION,
         dynamic_friction=RIGID_DYNAMIC_FRICTION,
@@ -165,7 +166,6 @@ def rigid_surface_material() -> NewtonMaterialPropertiesCfg:
 
 
 def spawn_scene() -> tuple[Articulation, RigidObject, DeformableObject]:
-    """生成机械臂、静态工作台、动态刚体目标方块和 VBD 可变形球。"""
     if not YAM_USD.is_file():
         raise FileNotFoundError(f"Converted YAM asset is missing: {YAM_USD}")
 
@@ -250,17 +250,16 @@ def spawn_scene() -> tuple[Articulation, RigidObject, DeformableObject]:
                         * BALL_POISSONS_RATIO
                         / ((1.0 + BALL_POISSONS_RATIO) * (1.0 - 2.0 * BALL_POISSONS_RATIO))
                     ),
-                    particle_radius=0.006,
+                    particle_radius=BALL_PARTICLE_RADIUS,
                 ),
             ),
-            init_state=DeformableObjectCfg.InitialStateCfg(pos=(0.15, -0.16, TABLE_TOP_Z + BALL_RADIUS + 0.01)),
+            init_state=DeformableObjectCfg.InitialStateCfg(pos=(0.15, -0.16, TABLE_TOP_Z + BALL_RADIUS)),
         )
     )
     return robot, block, ball
 
 
 def sample_object_positions(rng: random.Random) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
-    """在两个互相分离、机械臂可达的桌面区域中采样方块和球的位置。"""
     block_pos = (
         rng.uniform(0.02, 0.16),
         rng.uniform(0.08, 0.18),
@@ -269,7 +268,7 @@ def sample_object_positions(rng: random.Random) -> tuple[tuple[float, float, flo
     ball_pos = (
         rng.uniform(0.02, 0.16),
         rng.uniform(-0.18, -0.08),
-        TABLE_TOP_Z + BALL_RADIUS + 0.012,
+        TABLE_TOP_Z + BALL_RADIUS,
     )
     planar_distance = ((block_pos[0] - ball_pos[0]) ** 2 + (block_pos[1] - ball_pos[1]) ** 2) ** 0.5
     if planar_distance < 0.13:
@@ -283,8 +282,7 @@ def reset_episode(
     ball: DeformableObject,
     block_pos: tuple[float, float, float],
     ball_pos: tuple[float, float, float],
-) -> None:
-    """复位机器人、动态刚体方块以及软球的全部动力学状态。"""
+) -> tuple[float, float, float]:
     joint_pos = robot.data.default_joint_pos.torch.clone()
     joint_vel = torch.zeros_like(joint_pos)
     robot.write_joint_state_to_sim_index(position=joint_pos, velocity=joint_vel)
@@ -297,9 +295,13 @@ def reset_episode(
     block.write_root_velocity_to_sim_index(root_velocity=torch.zeros((1, 6), device=block_pose.device))
 
     nodal_state = ball.data.default_nodal_state_w.torch.clone()
-    current_center = nodal_state[..., :3].mean(dim=1)
-    desired_center = torch.tensor(ball_pos, device=nodal_state.device).unsqueeze(0)
-    nodal_state[..., :3] += (desired_center - current_center).unsqueeze(1)
+    positions = nodal_state[..., :3]
+    current_center = positions.mean(dim=1)
+    desired_xy = torch.tensor(ball_pos[:2], device=positions.device, dtype=positions.dtype).unsqueeze(0)
+    positions[..., :2] += (desired_xy - current_center[:, :2]).unsqueeze(1)
+    current_lowest_node_z = positions[..., 2].amin(dim=1)
+    desired_lowest_node_z = TABLE_TOP_Z + BALL_PARTICLE_RADIUS + BALL_RESET_CLEARANCE
+    positions[..., 2] += (desired_lowest_node_z - current_lowest_node_z).unsqueeze(1)
     nodal_state[..., 3:] = 0.0
     ball.write_nodal_state_to_sim_index(nodal_state)
 
@@ -312,84 +314,88 @@ def reset_episode(
     block.reset()
     ball.reset()
 
+    placed_center = nodal_state[0, :, :3].mean(dim=0)
+    return tuple(float(v) for v in placed_center.tolist())
 
-def block_support_metrics(
-    block: RigidObject,
-) -> tuple[float, tuple[float, float, float], tuple[float, float, float], bool]:
-    """返回方块底面间隙、线/角速度三个分量以及是否仍位于桌面有效区域。"""
+
+def block_support_metrics(block: RigidObject) -> tuple[float, tuple[float, float, float], tuple[float, float, float], bool]:
     pose = block.data.root_link_pose_w.torch[0]
     corners = torch.tensor(
-        [
-            (x * BLOCK_SIZE[0] / 2, y * BLOCK_SIZE[1] / 2, z * BLOCK_SIZE[2] / 2)
-            for x in (-1, 1)
-            for y in (-1, 1)
-            for z in (-1, 1)
-        ],
+        [(x * BLOCK_SIZE[0] / 2, y * BLOCK_SIZE[1] / 2, z * BLOCK_SIZE[2] / 2)
+         for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)],
         device=pose.device,
         dtype=pose.dtype,
     )
     corners_w = quat_apply(pose[3:].expand(8, -1), corners) + pose[:3]
-    bottom = corners_w[:, 2].min().item()
-    clearance = bottom - TABLE_TOP_Z
-
+    clearance = corners_w[:, 2].min().item() - TABLE_TOP_Z
     linear_velocity = tuple(float(v) for v in block.data.root_com_lin_vel_w.torch[0].tolist())
     angular_velocity = tuple(float(v) for v in block.data.root_com_ang_vel_w.torch[0].tolist())
-
     half_x = TABLE_SIZE[0] / 2.0 - BLOCK_SIZE[0] / 2.0
     half_y = TABLE_SIZE[1] / 2.0 - BLOCK_SIZE[1] / 2.0
-    on_table_xy = (
-        abs(pose[0].item() - TABLE_CENTER[0]) <= half_x
-        and abs(pose[1].item() - TABLE_CENTER[1]) <= half_y
-    )
+    on_table_xy = abs(pose[0].item() - TABLE_CENTER[0]) <= half_x and abs(pose[1].item() - TABLE_CENTER[1]) <= half_y
     return clearance, linear_velocity, angular_velocity, on_table_xy
 
 
 def check_block_support(block: RigidObject, *, stage: str) -> None:
-    """输出动态方块状态，并在方块离开桌面时尽早终止 episode。"""
     pose = block.data.root_link_pose_w.torch[0]
     clearance, linear_velocity, angular_velocity, on_table_xy = block_support_metrics(block)
     linear_speed = sum(v * v for v in linear_velocity) ** 0.5
     angular_speed = sum(v * v for v in angular_velocity) ** 0.5
     print(
         f"BLOCK_SUPPORT stage={stage} center={pose[:3].tolist()} clearance_m={clearance:.6f} "
-        f"linear_velocity_mps={[round(v, 7) for v in linear_velocity]} "
-        f"linear_speed_mps={linear_speed:.6f} "
-        f"angular_velocity_radps={[round(v, 7) for v in angular_velocity]} "
-        f"angular_speed_radps={angular_speed:.6f} on_table_xy={on_table_xy}",
+        f"linear_velocity_mps={[round(v, 7) for v in linear_velocity]} linear_speed_mps={linear_speed:.6f} "
+        f"angular_velocity_radps={[round(v, 7) for v in angular_velocity]} angular_speed_radps={angular_speed:.6f} "
+        f"on_table_xy={on_table_xy}", flush=True,
+    )
+    if not on_table_xy or clearance < -0.01:
+        raise RuntimeError(f"BLOCK_INSTABILITY: dynamic target block left the tabletop at stage={stage}")
+
+
+def block_state_is_settled(clearance, linear_velocity, angular_velocity, on_table_xy) -> bool:
+    linear_speed = sum(v * v for v in linear_velocity) ** 0.5
+    angular_speed = sum(v * v for v in angular_velocity) ** 0.5
+    return on_table_xy and abs(clearance) <= BLOCK_SETTLE_CLEARANCE and linear_speed <= BLOCK_SETTLE_LINEAR_SPEED and angular_speed <= BLOCK_SETTLE_ANGULAR_SPEED
+
+
+def ball_center(ball: DeformableObject) -> torch.Tensor:
+    return ball.data.nodal_pos_w.torch.mean(dim=1)
+
+
+def ball_settle_metrics(ball: DeformableObject):
+    nodal_state = ball.data.nodal_state_w.torch[0]
+    positions = nodal_state[:, :3]
+    velocities = nodal_state[:, 3:]
+    center = positions.mean(dim=0)
+    root_velocity = velocities.mean(dim=0)
+    max_nodal_speed = torch.linalg.vector_norm(velocities, dim=-1).max().item()
+    contact_clearance = positions[:, 2].min().item() - BALL_PARTICLE_RADIUS - TABLE_TOP_Z
+    half_x = TABLE_SIZE[0] / 2.0 - BALL_RADIUS
+    half_y = TABLE_SIZE[1] / 2.0 - BALL_RADIUS
+    on_table_xy = abs(center[0].item() - TABLE_CENTER[0]) <= half_x and abs(center[1].item() - TABLE_CENTER[1]) <= half_y
+    return tuple(float(v) for v in center.tolist()), contact_clearance, tuple(float(v) for v in root_velocity.tolist()), max_nodal_speed, on_table_xy
+
+
+def check_ball_support(ball: DeformableObject, *, stage: str, reset_center: tuple[float, float, float]) -> None:
+    center, clearance, root_velocity, max_nodal_speed, on_table_xy = ball_settle_metrics(ball)
+    root_speed = sum(v * v for v in root_velocity) ** 0.5
+    xy_drift = ((center[0] - reset_center[0]) ** 2 + (center[1] - reset_center[1]) ** 2) ** 0.5
+    print(
+        f"BALL_SUPPORT stage={stage} center={[round(v, 7) for v in center]} contact_clearance_m={clearance:.6f} "
+        f"xy_drift_m={xy_drift:.6f} root_velocity_mps={[round(v, 7) for v in root_velocity]} "
+        f"root_speed_mps={root_speed:.6f} max_nodal_speed_mps={max_nodal_speed:.6f} on_table_xy={on_table_xy}",
         flush=True,
     )
     if not on_table_xy or clearance < -0.01:
-        raise RuntimeError(
-            "BLOCK_INSTABILITY: dynamic target block left the tabletop "
-            f"at stage={stage}, clearance={clearance:.6f}, center={pose[:3].tolist()}"
-        )
+        raise RuntimeError(f"BALL_INSTABILITY: deformable ball left the tabletop or penetrated excessively at stage={stage}")
 
 
-def block_state_is_settled(
-    clearance: float,
-    linear_velocity: tuple[float, float, float],
-    angular_velocity: tuple[float, float, float],
-    on_table_xy: bool,
-) -> bool:
-    """根据一次状态采样判断方块是否处于可信的桌面静止状态。"""
-    linear_speed = sum(v * v for v in linear_velocity) ** 0.5
-    angular_speed = sum(v * v for v in angular_velocity) ** 0.5
-    return (
-        on_table_xy
-        and abs(clearance) <= BLOCK_SETTLE_CLEARANCE
-        and linear_speed <= BLOCK_SETTLE_LINEAR_SPEED
-        and angular_speed <= BLOCK_SETTLE_ANGULAR_SPEED
-    )
+def ball_state_is_settled(ball: DeformableObject) -> bool:
+    _, clearance, root_velocity, max_nodal_speed, on_table_xy = ball_settle_metrics(ball)
+    root_speed = sum(v * v for v in root_velocity) ** 0.5
+    return on_table_xy and abs(clearance) <= BALL_SETTLE_CONTACT_CLEARANCE and root_speed <= BALL_SETTLE_ROOT_SPEED and max_nodal_speed <= BALL_SETTLE_MAX_NODAL_SPEED
 
 
-def step_scene(
-    sim: SimulationContext,
-    robot: Articulation,
-    block: RigidObject,
-    ball: DeformableObject,
-    joint_target: torch.Tensor,
-) -> None:
-    """提交控制量、推进一个物理步，并刷新所有对象的数据缓存。"""
+def step_scene(sim, robot, block, ball, joint_target) -> None:
     robot.set_joint_position_target_index(target=joint_target)
     robot.write_data_to_sim()
     ball.write_data_to_sim()
@@ -398,224 +404,122 @@ def step_scene(
     robot.update(dt)
     block.update(dt)
     ball.update(dt)
-    for value in (
-        robot.data.joint_pos.torch,
-        robot.data.joint_vel.torch,
-        block.data.root_pos_w.torch,
-        block.data.root_com_vel_w.torch,
-        ball.data.nodal_state_w.torch,
-    ):
+    for value in (robot.data.joint_pos.torch, robot.data.joint_vel.torch, block.data.root_pos_w.torch, block.data.root_com_vel_w.torch, ball.data.nodal_state_w.torch):
         if not torch.isfinite(value).all():
             raise RuntimeError("FAILURE: non-finite simulation state")
 
 
-def wait_until_block_settled(
-    sim: SimulationContext,
-    robot: Articulation,
-    block: RigidObject,
-    ball: DeformableObject,
-    joint_target: torch.Tensor,
-    *,
-    episode: int,
-    minimum_steps: int,
-) -> int:
-    """推进仿真直到动态方块连续满足稳定判据，返回实际使用的物理步数。"""
+def wait_until_scene_settled(sim, robot, block, ball, joint_target, *, episode: int, minimum_steps: int, ball_reset_center) -> int:
     stable_steps = 0
-    timeout_steps = max(BLOCK_SETTLE_TIMEOUT_STEPS, minimum_steps + BLOCK_SETTLE_REQUIRED_STEPS)
-
+    timeout_steps = max(SCENE_SETTLE_TIMEOUT_STEPS, minimum_steps + SCENE_SETTLE_REQUIRED_STEPS)
     for step_index in range(timeout_steps):
         step_scene(sim, robot, block, ball, joint_target)
         step_count = step_index + 1
-
-        # 每一步都 fail-fast，但只在关键节点打印完整诊断，避免控制台刷屏。
-        clearance, linear_velocity, angular_velocity, on_table_xy = block_support_metrics(block)
-        if not on_table_xy or clearance < -0.01:
+        bc, blv, bav, bot = block_support_metrics(block)
+        ball_now, bclear, _, _, bon = ball_settle_metrics(ball)
+        if not bot or bc < -0.01:
             check_block_support(block, stage=f"episode_{episode}_step_{step_count}")
-            raise RuntimeError(
-                f"BLOCK_INSTABILITY: target block became unsupported before settling in episode {episode}"
-            )
+            raise RuntimeError(f"BLOCK_INSTABILITY: target block became unsupported in episode {episode}")
+        if not bon or bclear < -0.01:
+            check_ball_support(ball, stage=f"episode_{episode}_step_{step_count}", reset_center=ball_reset_center)
+            raise RuntimeError(f"BALL_INSTABILITY: deformable ball became unsupported in episode {episode}, center={ball_now}")
 
-        if block_state_is_settled(clearance, linear_velocity, angular_velocity, on_table_xy):
+        if block_state_is_settled(bc, blv, bav, bot) and ball_state_is_settled(ball):
             stable_steps += 1
         else:
             stable_steps = 0
 
-        if step_count in BLOCK_DIAGNOSTIC_STEPS or step_count == minimum_steps:
-            check_block_support(block, stage=f"episode_{episode}_settling_step_{step_count}")
+        if step_count in SCENE_DIAGNOSTIC_STEPS or step_count == minimum_steps:
+            stage = f"episode_{episode}_settling_step_{step_count}"
+            check_block_support(block, stage=stage)
+            check_ball_support(ball, stage=stage, reset_center=ball_reset_center)
 
-        if step_count >= minimum_steps and stable_steps >= BLOCK_SETTLE_REQUIRED_STEPS:
-            check_block_support(block, stage=f"episode_{episode}_settled_step_{step_count}")
+        if step_count >= minimum_steps and stable_steps >= SCENE_SETTLE_REQUIRED_STEPS:
+            stage = f"episode_{episode}_settled_step_{step_count}"
+            check_block_support(block, stage=stage)
+            check_ball_support(ball, stage=stage, reset_center=ball_reset_center)
             print(
-                f"BLOCK_SETTLED episode={episode} steps={step_count} "
-                f"stable_steps={stable_steps} linear_threshold_mps={BLOCK_SETTLE_LINEAR_SPEED:.6f} "
-                f"angular_threshold_radps={BLOCK_SETTLE_ANGULAR_SPEED:.6f}",
-                flush=True,
+                f"SCENE_SETTLED episode={episode} steps={step_count} stable_steps={stable_steps} "
+                f"block_linear_threshold_mps={BLOCK_SETTLE_LINEAR_SPEED:.6f} "
+                f"ball_root_threshold_mps={BALL_SETTLE_ROOT_SPEED:.6f} "
+                f"ball_max_nodal_threshold_mps={BALL_SETTLE_MAX_NODAL_SPEED:.6f}", flush=True,
             )
             return step_count
 
     check_block_support(block, stage=f"episode_{episode}_settle_timeout")
-    raise RuntimeError(
-        f"BLOCK_SETTLE_TIMEOUT: episode={episode} did not remain stable for "
-        f"{BLOCK_SETTLE_REQUIRED_STEPS} consecutive steps within {timeout_steps} physics steps"
-    )
-
-
-def ball_center(ball: DeformableObject) -> torch.Tensor:
-    return ball.data.nodal_pos_w.torch.mean(dim=1)
+    check_ball_support(ball, stage=f"episode_{episode}_settle_timeout", reset_center=ball_reset_center)
+    raise RuntimeError(f"SCENE_SETTLE_TIMEOUT: episode={episode} did not keep block and ball stable for {SCENE_SETTLE_REQUIRED_STEPS} consecutive steps within {timeout_steps} physics steps")
 
 
 def finger_surface_points(robot: Articulation) -> torch.Tensor:
     tip_indices = [robot.body_names.index("tip_left"), robot.body_names.index("tip_right")]
     tip_poses_w = robot.data.body_link_pose_w.torch[0, tip_indices]
-    local_centers = torch.tensor(
-        (LEFT_PAD_LOCAL_POS, RIGHT_PAD_LOCAL_POS),
-        device=robot.device,
-        dtype=tip_poses_w.dtype,
-    )
+    local_centers = torch.tensor((LEFT_PAD_LOCAL_POS, RIGHT_PAD_LOCAL_POS), device=robot.device, dtype=tip_poses_w.dtype)
     return tip_poses_w[:, :3] + quat_apply(tip_poses_w[:, 3:], local_centers)
 
 
-def grasp_geometry_metrics(robot: Articulation, ball: DeformableObject) -> tuple[float, float]:
+def grasp_geometry_metrics(robot, ball):
     pad_centers = finger_surface_points(robot)
     center_delta = pad_centers[1] - pad_centers[0]
     center_distance = torch.linalg.vector_norm(center_delta)
     grasp_axis = center_delta / center_distance.clamp_min(1.0e-8)
     node_projections = ball.data.nodal_pos_w.torch[0] @ grasp_axis
-    ball_width = node_projections.max() - node_projections.min()
-    return center_distance.item(), ball_width.item()
+    return center_distance.item(), (node_projections.max() - node_projections.min()).item()
 
 
-def grasp_point_kinematics(
-    root_pose_w: torch.Tensor,
-    arm_pos: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def grasp_point_kinematics(root_pose_w, arm_pos):
     gripper_pos_w, gripper_rot_w, geometric_jacobian_w = forward_kinematics_and_jacobian(root_pose_w, arm_pos)
     local_offset = torch.tensor(GRASP_POINT_LOCAL, device=arm_pos.device, dtype=arm_pos.dtype)
     offset_w = (gripper_rot_w @ local_offset.expand(arm_pos.shape[0], 3).unsqueeze(-1)).squeeze(-1)
     grasp_pos_w = gripper_pos_w + offset_w
     angular_columns = geometric_jacobian_w[:, 3:, :].transpose(1, 2)
-    point_velocity_columns = torch.linalg.cross(
-        angular_columns,
-        offset_w.unsqueeze(1).expand_as(angular_columns),
-        dim=-1,
-    )
+    point_velocity_columns = torch.linalg.cross(angular_columns, offset_w.unsqueeze(1).expand_as(angular_columns), dim=-1)
     point_jacobian_w = geometric_jacobian_w[:, :3, :] + point_velocity_columns.transpose(1, 2)
-    grasp_geometric_jacobian_w = torch.cat((point_jacobian_w, geometric_jacobian_w[:, 3:, :]), dim=1)
-    return gripper_pos_w, gripper_rot_w, grasp_pos_w, grasp_geometric_jacobian_w
+    return gripper_pos_w, gripper_rot_w, grasp_pos_w, torch.cat((point_jacobian_w, geometric_jacobian_w[:, 3:, :]), dim=1)
 
 
-def move_grasp_point(
-    sim: SimulationContext,
-    robot: Articulation,
-    block: RigidObject,
-    ball: DeformableObject,
-    target_pos_w: torch.Tensor,
-    gripper_target: float,
-    num_steps: int,
-    maintain_orientation: bool = True,
-    target_rotation_w: torch.Tensor | None = None,
-) -> tuple[float, float]:
+def move_grasp_point(sim, robot, block, ball, target_pos_w, gripper_target, num_steps, maintain_orientation=True, target_rotation_w=None):
     ee_body_idx = robot.body_names.index("gripper")
     limits = robot.data.joint_pos_limits.torch[0, :6]
     initial_fk_error = 0.0
-    if target_rotation_w is None:
-        target_rot_w = torch.tensor(
-            GRASP_ROTATION_W, device=robot.device, dtype=robot.data.joint_pos.torch.dtype
-        ).unsqueeze(0)
-    else:
-        target_rot_w = target_rotation_w
-
+    target_rot_w = torch.tensor(GRASP_ROTATION_W, device=robot.device, dtype=robot.data.joint_pos.torch.dtype).unsqueeze(0) if target_rotation_w is None else target_rotation_w
     _, _, start_pos, _ = grasp_point_kinematics(robot.data.root_link_pose_w.torch, robot.data.joint_pos.torch[:, :6])
     travel_steps = max(num_steps, int(torch.linalg.vector_norm(target_pos_w - start_pos).item() / 0.0005) + 1)
     for step in range(travel_steps + 60):
         waypoint = start_pos + min(1.0, (step + 1) / travel_steps) * (target_pos_w - start_pos)
         root_pose_w = robot.data.root_link_pose_w.torch
         arm_pos = robot.data.joint_pos.torch[:, :6]
-        gripper_pos_w, gripper_rot_w, grasp_pos_w, grasp_geometric_jacobian_w = grasp_point_kinematics(
-            root_pose_w, arm_pos
-        )
+        gripper_pos_w, gripper_rot_w, grasp_pos_w, jac = grasp_point_kinematics(root_pose_w, arm_pos)
         if step == 0:
             simulated_pos_w = robot.data.body_link_pose_w.torch[:, ee_body_idx, :3]
             initial_fk_error = torch.linalg.vector_norm(gripper_pos_w - simulated_pos_w, dim=-1).item()
-
         if maintain_orientation:
-            joint_delta = damped_least_squares_pose_step(
-                grasp_pos_w,
-                waypoint,
-                gripper_rot_w,
-                target_rot_w,
-                grasp_geometric_jacobian_w,
-                damping=0.05,
-            )
+            joint_delta = damped_least_squares_pose_step(grasp_pos_w, waypoint, gripper_rot_w, target_rot_w, jac, damping=0.05)
         else:
-            joint_delta = damped_least_squares_position_step(
-                grasp_pos_w,
-                waypoint,
-                grasp_geometric_jacobian_w[:, :3, :],
-                damping=0.05,
-            )
-        arm_target = arm_pos + torch.clamp(joint_delta, min=-0.02, max=0.02)
-        arm_target = torch.clamp(arm_target, min=limits[:, 0], max=limits[:, 1])
-
+            joint_delta = damped_least_squares_position_step(grasp_pos_w, waypoint, jac[:, :3, :], damping=0.05)
+        arm_target = torch.clamp(arm_pos + torch.clamp(joint_delta, min=-0.02, max=0.02), min=limits[:, 0], max=limits[:, 1])
         full_target = robot.data.joint_pos.torch.clone()
         full_target[:, :6] = arm_target
         full_target[:, 6:] = gripper_target
         step_scene(sim, robot, block, ball, full_target)
-
-    _, _, final_grasp_pos_w, _ = grasp_point_kinematics(
-        robot.data.root_link_pose_w.torch,
-        robot.data.joint_pos.torch[:, :6],
-    )
-    final_error = torch.linalg.vector_norm(final_grasp_pos_w - target_pos_w, dim=-1).item()
-    return final_error, initial_fk_error
+    _, _, final_grasp_pos_w, _ = grasp_point_kinematics(robot.data.root_link_pose_w.torch, robot.data.joint_pos.torch[:, :6])
+    return torch.linalg.vector_norm(final_grasp_pos_w - target_pos_w, dim=-1).item(), initial_fk_error
 
 
-def solve_approach_joint_target(
-    robot: Articulation,
-    target_pos_w: torch.Tensor,
-    target_rotation_w: torch.Tensor,
-    iterations: int = 300,
-) -> tuple[torch.Tensor, float, float]:
-    arm_target = torch.tensor(
-        (APPROACH_IK_SEED,),
-        device=robot.device,
-        dtype=robot.data.joint_pos.torch.dtype,
-    )
+def solve_approach_joint_target(robot, target_pos_w, target_rotation_w, iterations=300):
+    arm_target = torch.tensor((APPROACH_IK_SEED,), device=robot.device, dtype=robot.data.joint_pos.torch.dtype)
     limits = robot.data.joint_pos_limits.torch[0, :6]
     root_pose_w = robot.data.root_link_pose_w.torch
-
     for _ in range(iterations):
         _, current_rotation_w, _ = forward_kinematics_and_jacobian(root_pose_w, arm_target)
         _, _, grasp_pos_w, grasp_jacobian_w = grasp_point_kinematics(root_pose_w, arm_target)
-        joint_delta = damped_least_squares_pose_step(
-            grasp_pos_w,
-            target_pos_w,
-            current_rotation_w,
-            target_rotation_w,
-            grasp_jacobian_w,
-            damping=0.03,
-        )
-        arm_target = torch.clamp(
-            arm_target + torch.clamp(joint_delta, min=-0.05, max=0.05),
-            min=limits[:, 0],
-            max=limits[:, 1],
-        )
-
+        joint_delta = damped_least_squares_pose_step(grasp_pos_w, target_pos_w, current_rotation_w, target_rotation_w, grasp_jacobian_w, damping=0.03)
+        arm_target = torch.clamp(arm_target + torch.clamp(joint_delta, min=-0.05, max=0.05), min=limits[:, 0], max=limits[:, 1])
     _, solved_rotation_w, solved_pos_w, _ = grasp_point_kinematics(root_pose_w, arm_target)
-    position_error = torch.linalg.vector_norm(solved_pos_w - target_pos_w, dim=-1).item()
-    rotation_error = torch.linalg.matrix_norm(solved_rotation_w - target_rotation_w, dim=(-2, -1)).item()
-    return arm_target, position_error, rotation_error
+    return arm_target, torch.linalg.vector_norm(solved_pos_w - target_pos_w, dim=-1).item(), torch.linalg.matrix_norm(solved_rotation_w - target_rotation_w, dim=(-2, -1)).item()
 
 
-def execute_arm_trajectory(
-    sim: SimulationContext,
-    robot: Articulation,
-    block: RigidObject,
-    ball: DeformableObject,
-    target_arm_pos: torch.Tensor,
-    gripper_target: float,
-    num_steps: int,
-) -> None:
+def execute_arm_trajectory(sim, robot, block, ball, target_arm_pos, gripper_target, num_steps):
     start_arm_pos = robot.data.joint_pos.torch[:, :6].clone()
     for step in range(num_steps):
         phase = (step + 1) / num_steps
@@ -626,17 +530,7 @@ def execute_arm_trajectory(
         step_scene(sim, robot, block, ball, full_target)
 
 
-def hold_grasp(
-    sim: SimulationContext,
-    robot: Articulation,
-    block: RigidObject,
-    ball: DeformableObject,
-    target_pos_w: torch.Tensor,
-    gripper_start: float,
-    gripper_end: float,
-    num_steps: int,
-    target_rotation_w: torch.Tensor | None,
-) -> None:
+def hold_grasp(sim, robot, block, ball, target_pos_w, gripper_start, gripper_end, num_steps, target_rotation_w):
     target = robot.data.joint_pos.torch.clone()
     steps = max(num_steps, int(abs(gripper_end - gripper_start) / (0.005 * sim.get_physics_dt())) + 1)
     for step in range(steps):
@@ -670,83 +564,29 @@ def check_ball_in_gripper(robot, ball):
         raise RuntimeError("FAILURE: excessive deformation")
 
 
-def pick_and_lift_ball(
-    sim: SimulationContext,
-    robot: Articulation,
-    block: RigidObject,
-    ball: DeformableObject,
-    initial_ball_pos: tuple[float, float, float],
-    motion_steps: int,
-    lift_height: float,
-) -> dict[str, float]:
+def pick_and_lift_ball(sim, robot, block, ball, initial_ball_pos, motion_steps, lift_height):
     device = robot.device
     dtype = robot.data.joint_pos.torch.dtype
     initial_ball_target = torch.tensor((initial_ball_pos,), device=device, dtype=dtype)
-    pregrasp_height = 0.10
-    pregrasp_offset = torch.tensor(((0.0, 0.0, pregrasp_height),), device=device, dtype=dtype)
+    pregrasp_offset = torch.tensor(((0.0, 0.0, 0.10),), device=device, dtype=dtype)
     pregrasp_target = initial_ball_target + pregrasp_offset
     approach_rotation_w = torch.tensor(GRASP_ROTATION_W, device=device, dtype=dtype).unsqueeze(0)
-
-    pregrasp_joint_target, solved_position_error, solved_rotation_error = solve_approach_joint_target(
-        robot,
-        pregrasp_target,
-        approach_rotation_w,
-    )
+    pregrasp_joint_target, solved_position_error, solved_rotation_error = solve_approach_joint_target(robot, pregrasp_target, approach_rotation_w)
     if solved_position_error > 0.002 or solved_rotation_error > 0.02:
-        raise RuntimeError(
-            "Pregrasp IK did not converge: "
-            f"position_error={solved_position_error:.6f}, rotation_error={solved_rotation_error:.6f}"
-        )
-    execute_arm_trajectory(
-        sim,
-        robot,
-        block,
-        ball,
-        pregrasp_joint_target,
-        GRIPPER_OPEN_POSITION,
-        motion_steps,
-    )
+        raise RuntimeError(f"Pregrasp IK did not converge: position_error={solved_position_error:.6f}, rotation_error={solved_rotation_error:.6f}")
+    execute_arm_trajectory(sim, robot, block, ball, pregrasp_joint_target, GRIPPER_OPEN_POSITION, motion_steps)
 
     tracked_pregrasp_target = ball_center(ball).clone() + pregrasp_offset
-    tracked_joint_target, solved_position_error, solved_rotation_error = solve_approach_joint_target(
-        robot,
-        tracked_pregrasp_target,
-        approach_rotation_w,
-    )
+    tracked_joint_target, solved_position_error, solved_rotation_error = solve_approach_joint_target(robot, tracked_pregrasp_target, approach_rotation_w)
     if solved_position_error > 0.002 or solved_rotation_error > 0.02:
-        raise RuntimeError(
-            "Tracked pregrasp IK did not converge: "
-            f"position_error={solved_position_error:.6f}, rotation_error={solved_rotation_error:.6f}"
-        )
-    execute_arm_trajectory(
-        sim,
-        robot,
-        block,
-        ball,
-        tracked_joint_target,
-        GRIPPER_OPEN_POSITION,
-        max(60, motion_steps // 2),
-    )
-    _, _, actual_pregrasp_pos_w, _ = grasp_point_kinematics(
-        robot.data.root_link_pose_w.torch,
-        robot.data.joint_pos.torch[:, :6],
-    )
+        raise RuntimeError(f"Tracked pregrasp IK did not converge: position_error={solved_position_error:.6f}, rotation_error={solved_rotation_error:.6f}")
+    execute_arm_trajectory(sim, robot, block, ball, tracked_joint_target, GRIPPER_OPEN_POSITION, max(60, motion_steps // 2))
+    _, _, actual_pregrasp_pos_w, _ = grasp_point_kinematics(robot.data.root_link_pose_w.torch, robot.data.joint_pos.torch[:, :6])
     pregrasp_error = torch.linalg.vector_norm(actual_pregrasp_pos_w - tracked_pregrasp_target, dim=-1).item()
     gripper_index = robot.body_names.index("gripper")
-    fk_error = torch.linalg.vector_norm(
-        forward_kinematics_and_jacobian(
-            robot.data.root_link_pose_w.torch,
-            robot.data.joint_pos.torch[:, :6],
-        )[0]
-        - robot.data.body_link_pose_w.torch[:, gripper_index, :3],
-        dim=-1,
-    ).item()
-    print(
-        f"PICK_LIFT_STAGE=pregrasp error_m={pregrasp_error:.6f} ball_center={ball_center(ball)[0].cpu().tolist()}",
-        flush=True,
-    )
+    fk_error = torch.linalg.vector_norm(forward_kinematics_and_jacobian(robot.data.root_link_pose_w.torch, robot.data.joint_pos.torch[:, :6])[0] - robot.data.body_link_pose_w.torch[:, gripper_index, :3], dim=-1).item()
+    print(f"PICK_LIFT_STAGE=pregrasp error_m={pregrasp_error:.6f} ball_center={ball_center(ball)[0].cpu().tolist()}", flush=True)
     print(f"FINGER_SURFACE_POINTS_PREGRASP={finger_surface_points(robot).cpu().tolist()}", flush=True)
-
     if pregrasp_error > 0.005:
         raise RuntimeError(f"FAILURE PRE_GRASP: tracking error {pregrasp_error}")
     gap, width = grasp_geometry_metrics(robot, ball)
@@ -755,93 +595,45 @@ def pick_and_lift_ball(
 
     print("STATE=DESCEND", flush=True)
     grasp_target = ball_center(ball).clone()
-    grasp_error, _ = move_grasp_point(
-        sim,
-        robot,
-        block,
-        ball,
-        grasp_target,
-        GRIPPER_OPEN_POSITION,
-        motion_steps,
-        target_rotation_w=approach_rotation_w,
-    )
-    print(
-        f"PICK_LIFT_STAGE=grasp error_m={grasp_error:.6f} ball_center={ball_center(ball)[0].cpu().tolist()}",
-        flush=True,
-    )
+    grasp_error, _ = move_grasp_point(sim, robot, block, ball, grasp_target, GRIPPER_OPEN_POSITION, motion_steps, target_rotation_w=approach_rotation_w)
+    print(f"PICK_LIFT_STAGE=grasp error_m={grasp_error:.6f} ball_center={ball_center(ball)[0].cpu().tolist()}", flush=True)
     print(f"FINGER_SURFACE_POINTS_OPEN={finger_surface_points(robot).cpu().tolist()}", flush=True)
     if grasp_error > 0.005:
         raise RuntimeError(f"FAILURE DESCEND: tracking error {grasp_error}")
     check_ball_in_gripper(robot, ball)
 
     print("STATE=CLOSE_GRIPPER", flush=True)
-    hold_grasp(
-        sim,
-        robot,
-        block,
-        ball,
-        grasp_target,
-        GRIPPER_OPEN_POSITION,
-        GRIPPER_GRASP_POSITION,
-        max(60, motion_steps // 2),
-        approach_rotation_w,
-    )
-    print(
-        f"PICK_LIFT_STAGE=closed ball_center={ball_center(ball)[0].cpu().tolist()} "
-        f"finger_joints={robot.data.joint_pos.torch[0, 6:].cpu().tolist()}",
-        flush=True,
-    )
+    hold_grasp(sim, robot, block, ball, grasp_target, GRIPPER_OPEN_POSITION, GRIPPER_GRASP_POSITION, max(60, motion_steps // 2), approach_rotation_w)
+    print(f"PICK_LIFT_STAGE=closed ball_center={ball_center(ball)[0].cpu().tolist()} finger_joints={robot.data.joint_pos.torch[0, 6:].cpu().tolist()}", flush=True)
     print(f"FINGER_SURFACE_POINTS_CLOSED={finger_surface_points(robot).cpu().tolist()}", flush=True)
-
     measured_gap, ball_width_after_grasp = grasp_geometry_metrics(robot, ball)
-    print(
-        f"PHYSICAL_GRASP target_gap_m={GRIPPER_TARGET_GAP:.6f} "
-        f"measured_gap_m={measured_gap:.6f} ball_width_on_grasp_axis_m={ball_width_after_grasp:.6f}",
-        flush=True,
-    )
+    print(f"PHYSICAL_GRASP target_gap_m={GRIPPER_TARGET_GAP:.6f} measured_gap_m={measured_gap:.6f} ball_width_on_grasp_axis_m={ball_width_after_grasp:.6f}", flush=True)
     closed_target = robot.data.joint_pos.torch.clone()
     closed_target[:, 6:] = GRIPPER_GRASP_POSITION
     print("STATE=HOLD", flush=True)
     for _ in range(120):
         step_scene(sim, robot, block, ball, closed_target)
         check_ball_in_gripper(robot, ball)
-
     if args_cli.stop_after_hold:
         print("CLOSE_HOLD_COMPLETED_NOT_LIFT_SUCCESS", flush=True)
         return {"hold_only": 1.0}
 
     print("STATE=LIFT", flush=True)
     center_before_lift = ball_center(ball).clone()
-    _, _, grasp_before_lift, _ = grasp_point_kinematics(
-        robot.data.root_link_pose_w.torch,
-        robot.data.joint_pos.torch[:, :6],
-    )
+    _, _, grasp_before_lift, _ = grasp_point_kinematics(robot.data.root_link_pose_w.torch, robot.data.joint_pos.torch[:, :6])
     lift_target = grasp_before_lift.clone()
     lift_target[:, 2] += lift_height
-    lift_error, _ = move_grasp_point(
-        sim,
-        robot,
-        block,
-        ball,
-        lift_target,
-        GRIPPER_GRASP_POSITION,
-        motion_steps * 2,
-        target_rotation_w=approach_rotation_w,
-    )
-    print(
-        f"PICK_LIFT_STAGE=lift error_m={lift_error:.6f} ball_center={ball_center(ball)[0].cpu().tolist()}",
-        flush=True,
-    )
+    lift_error, _ = move_grasp_point(sim, robot, block, ball, lift_target, GRIPPER_GRASP_POSITION, motion_steps * 2, target_rotation_w=approach_rotation_w)
+    print(f"PICK_LIFT_STAGE=lift error_m={lift_error:.6f} ball_center={ball_center(ball)[0].cpu().tolist()}", flush=True)
     final_target = robot.data.joint_pos.torch.clone()
     final_target[:, 6:] = GRIPPER_GRASP_POSITION
     for _ in range(120):
         step_scene(sim, robot, block, ball, final_target)
         check_ball_in_gripper(robot, ball)
-        lowest = ball.data.nodal_pos_w.torch[..., 2].min().item() - 0.006
+        lowest = ball.data.nodal_pos_w.torch[..., 2].min().item() - BALL_PARTICLE_RADIUS
         rise = (ball_center(ball)[:, 2] - center_before_lift[:, 2]).item()
         if lowest < TABLE_TOP_Z + 0.002 or rise < lift_height * MIN_LIFT_RATIO:
             raise RuntimeError(f"FAILURE LIFT_HOLD: bottom={lowest}, rise={rise}")
-
     center_after_lift = ball_center(ball)
     actual_lift = (center_after_lift[:, 2] - center_before_lift[:, 2]).item()
     return {
@@ -870,74 +662,52 @@ def main() -> None:
     if args_cli.stop_after_hold and not args_cli.pick_lift:
         raise ValueError("--stop-after-hold requires --pick-lift")
 
-    mode = (
-        "GRIPPER_CHECK (arm fixed)"
-        if args_cli.gripper_check
-        else ("PICK_LIFT" if args_cli.pick_lift else "RESET_ONLY (arm fixed)")
-    )
+    mode = "GRIPPER_CHECK (arm fixed)" if args_cli.gripper_check else ("PICK_LIFT" if args_cli.pick_lift else "RESET_ONLY (arm fixed)")
     print(f"RUN_MODE={mode}", flush=True)
     sim = make_sim()
     sim.set_camera_view(eye=(1.25, -1.20, 1.15), target=(0.12, 0.0, TABLE_TOP_Z))
     robot, block, ball = spawn_scene()
     sim.reset()
-
     if robot.num_joints != 8:
         raise RuntimeError(f"Expected 8 YAM joints, got {robot.num_joints}: {robot.joint_names}")
 
     rng = random.Random(args_cli.seed)
-    results: list[dict[str, object]] = []
-    pick_lift_result: dict[str, float] | None = None
+    results = []
+    pick_lift_result = None
     for episode in range(args_cli.episodes):
         block_pos, ball_pos = sample_object_positions(rng)
-        reset_episode(robot, block, ball, block_pos, ball_pos)
-
-        settle_steps = wait_until_block_settled(
-            sim,
-            robot,
-            block,
-            ball,
-            robot.data.default_joint_pos.torch,
-            episode=episode,
-            minimum_steps=args_cli.steps_per_episode,
+        ball_reset_center = reset_episode(robot, block, ball, block_pos, ball_pos)
+        settle_steps = wait_until_scene_settled(
+            sim, robot, block, ball, robot.data.default_joint_pos.torch,
+            episode=episode, minimum_steps=args_cli.steps_per_episode, ball_reset_center=ball_reset_center,
         )
 
         if args_cli.gripper_check:
             check_gripper_motion(sim, robot, block, ball)
         if args_cli.pick_lift:
             settled_ball_pos = tuple(ball_center(ball)[0].cpu().tolist())
-            pick_lift_result = pick_and_lift_ball(
-                sim,
-                robot,
-                block,
-                ball,
-                settled_ball_pos,
-                args_cli.motion_steps,
-                args_cli.lift_height,
-            )
+            pick_lift_result = pick_and_lift_ball(sim, robot, block, ball, settled_ball_pos, args_cli.motion_steps, args_cli.lift_height)
 
         check_block_support(block, stage=f"episode_{episode}_complete")
+        check_ball_support(ball, stage=f"episode_{episode}_complete", reset_center=ball_reset_center)
 
-        tensors = (
-            robot.data.joint_pos.torch,
-            block.data.root_pos_w.torch,
-            block.data.root_com_vel_w.torch,
-            ball.data.nodal_pos_w.torch,
-        )
+        tensors = (robot.data.joint_pos.torch, block.data.root_pos_w.torch, block.data.root_com_vel_w.torch, ball.data.nodal_state_w.torch)
         if not all(torch.isfinite(value).all() for value in tensors):
             raise RuntimeError(f"Non-finite simulation state in episode {episode}")
 
         measured_block = block.data.root_pos_w.torch[0].cpu().tolist()
         measured_ball = ball.data.nodal_pos_w.torch[0].mean(dim=0).cpu().tolist()
-        results.append(
-            {
-                "episode": episode,
-                "settle_steps": settle_steps,
-                "sampled_block": [round(v, 4) for v in block_pos],
-                "sampled_ball": [round(v, 4) for v in ball_pos],
-                "measured_block": [round(v, 4) for v in measured_block],
-                "measured_ball_center": [round(v, 4) for v in measured_ball],
-            }
-        )
+        ball_xy_drift = ((measured_ball[0] - ball_reset_center[0]) ** 2 + (measured_ball[1] - ball_reset_center[1]) ** 2) ** 0.5
+        results.append({
+            "episode": episode,
+            "settle_steps": settle_steps,
+            "sampled_block": [round(v, 4) for v in block_pos],
+            "sampled_ball": [round(v, 4) for v in ball_pos],
+            "reset_ball_center": [round(v, 4) for v in ball_reset_center],
+            "measured_block": [round(v, 4) for v in measured_block],
+            "measured_ball_center": [round(v, 4) for v in measured_ball],
+            "ball_xy_drift_m": round(ball_xy_drift, 6),
+        })
 
     print(f"NEWTON_SOLVER={type(sim.cfg.physics.solver_cfg).__name__}")
     print(f"YAM_JOINT_NAMES={robot.joint_names}")
