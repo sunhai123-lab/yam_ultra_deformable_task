@@ -158,3 +158,27 @@ def damped_least_squares_position_step(
     jacobian_t = position_jacobian_w.transpose(1, 2)
     regularizer = (damping**2) * torch.eye(3, device=current_pos_w.device, dtype=current_pos_w.dtype)
     return (jacobian_t @ torch.linalg.solve(position_jacobian_w @ jacobian_t + regularizer, error.unsqueeze(-1))).squeeze(-1)
+
+
+def damped_least_squares_pose_step(
+    current_pos_w: torch.Tensor,
+    target_pos_w: torch.Tensor,
+    current_rot_w: torch.Tensor,
+    target_rot_w: torch.Tensor,
+    geometric_jacobian_w: torch.Tensor,
+    damping: float = 0.05,
+) -> torch.Tensor:
+    """Compute one 6D pose DLS step with a world-frame rotation error."""
+    position_error = target_pos_w - current_pos_w
+    orientation_error = 0.5 * (
+        torch.linalg.cross(current_rot_w[:, :, 0], target_rot_w[:, :, 0], dim=-1)
+        + torch.linalg.cross(current_rot_w[:, :, 1], target_rot_w[:, :, 1], dim=-1)
+        + torch.linalg.cross(current_rot_w[:, :, 2], target_rot_w[:, :, 2], dim=-1)
+    )
+    pose_error = torch.cat((position_error, orientation_error), dim=-1)
+    jacobian_t = geometric_jacobian_w.transpose(1, 2)
+    regularizer = (damping**2) * torch.eye(6, device=current_pos_w.device, dtype=current_pos_w.dtype)
+    return (
+        jacobian_t
+        @ torch.linalg.solve(geometric_jacobian_w @ jacobian_t + regularizer, pose_error.unsqueeze(-1))
+    ).squeeze(-1)

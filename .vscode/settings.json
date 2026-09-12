@@ -6,11 +6,22 @@
     "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/source/isaaclab_assets",
     "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/source/isaaclab_contrib",
     "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/source/isaaclab_newton",
-    "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/source/isaaclab_tasks"
+    "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/source/isaaclab_ov",
+    "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/source/isaaclab_ovphysx",
+    "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/source/isaaclab_physx",
+    "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/source/isaaclab_tasks",
+    "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/source/isaaclab_visualizers",
+    "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/env_isaaclab/lib/python3.12/site-packages",
+    "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/env_isaaclab/lib/python3.12/site-packages/cmeel.prefix/lib/python3.12/site-packages"
   ],
-  "python.analysis.typeCheckingMode": "basic",
+  "python.analysis.typeCheckingMode": "off",
+  "python.analysis.diagnosticMode": "openFilesOnly",
+  "python.analysis.autoSearchPaths": true,
+  "python.analysis.useLibraryCodeForTypes": true,
+  "python.analysis.indexing": true,
   "python.terminal.activateEnvironment": true,
-  "ruff.configuration": "${workspaceFolder}/pyproject.toml",
+  "flake8.enabled": false,
+  "black-formatter.args": ["--line-length", "120"],
   "editor.rulers": [120],
   "files.exclude": {"**/__pycache__": true, "**/*.egg-info": true},
   "files.watcherExclude": {
@@ -20,11 +31,8 @@
     "**/assets/generated/**": true
   },
   "[python]": {
-    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.defaultFormatter": "ms-python.black-formatter",
     "editor.formatOnSave": true,
-    "editor.codeActionsOnSave": {
-      "source.fixAll.ruff": "explicit",
-      "source.organizeImports.ruff": "explicit"
-    }
+    "editor.codeActionsOnSave": {}
   }
 }

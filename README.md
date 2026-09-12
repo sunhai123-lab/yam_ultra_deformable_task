@@ -1,167 +1,68 @@
-# YAM Ultra deformable-ball placement with Isaac Lab Newton
+# YAM Ultra deformable-ball placement
 
+This project builds a YAM Ultra 2 tabletop scene directly with Isaac Lab and uses Newton for coupled rigid/deformable simulation. It does not copy a task or policy from another robotics project.
 
-## Current implementation status
+## Main files
 
-The first Newton task milestone is executable:
+- `scripts/smoke_test_integrated_task.py`: scene creation, randomized reset, hard-coded grasp/lift sequence, Newton stepping, and success checks.
+- `source/yam_ultra_deformable_place/yam_ultra_deformable_place/yam_kinematics.py`: project-local forward kinematics, geometric Jacobian, and damped least-squares IK.
+- `scripts/convert_yam_ultra_2.py`: converts the vendored YAM URDF to the USD consumed by the task.
+- `assets/vendor/i2rt`: original robot descriptions, meshes, attribution, and license.
+- `assets/generated/yam_ultra_2`: converted runtime USD asset.
+- `.vscode`: F5 and Ctrl+Shift+B launch configurations.
 
-- `scripts/smoke_test_integrated_task.py` builds one scene directly from Isaac Lab APIs with the YAM Ultra 2, a static table, a rigid target block, and a tetrahedral deformable ball.
-- Newton uses `CoupledMJWarpVBDSolverCfg` in `two_way` mode: MJWarp handles rigid and articulation dynamics, while VBD handles the deformable ball.
-- Every episode samples separated block and ball positions from a deterministic seed and resets rigid pose and velocity, all soft-body nodal positions and velocities, free-node targets, and robot joint state.
-- `yam_kinematics.py` implements YAM forward kinematics, geometric Jacobian, and position DLS from the vendored official URDF using PyTorch only.
-- A randomized pre-grasp waypoint reached 5.6 mm final error; custom FK and the simulated gripper position matched within printed precision.
+The expected Isaac Lab installation and exact versions are recorded in `VERSIONS.md`.
 
-Baseline reset test:
+## One-time package setup
+
+```bash
+/home/lightwheel-laure/embodied_ai_learning/isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/env_isaaclab/bin/python \
+-m pip install -e source/yam_ultra_deformable_place
+```
+
+## Run
+
+Open this directory as the VS Code workspace. Ctrl+Shift+B runs the GUI grasp-and-lift configuration. F5 exposes GUI, headless reset, and headless grasp-and-lift configurations.
+
+Equivalent GUI command:
 
 ```bash
 OMNI_KIT_ACCEPT_EULA=yes ACCEPT_EULA=Y \
 /home/lightwheel-laure/embodied_ai_learning/isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/isaaclab.sh \
--p scripts/smoke_test_integrated_task.py --viz none --episodes 3 --steps-per-episode 60 --seed 7
+-p scripts/smoke_test_integrated_task.py --visualizer kit --keep-open \
+--episodes 1 --steps-per-episode 60 --pick-lift \
+--motion-steps 240 --lift-height 0.4 --seed 7
 ```
 
-Current one-episode IK test:
+Headless 0.4 m grasp-and-lift check:
 
 ```bash
 OMNI_KIT_ACCEPT_EULA=yes ACCEPT_EULA=Y \
 /home/lightwheel-laure/embodied_ai_learning/isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/isaaclab.sh \
--p scripts/smoke_test_integrated_task.py --viz none --episodes 1 --steps-per-episode 1 \
---ik-smoke-steps 240 --seed 7
+-p scripts/smoke_test_integrated_task.py --visualizer none \
+--episodes 1 --steps-per-episode 60 --pick-lift \
+--motion-steps 240 --lift-height 0.4 --seed 7
 ```
 
-Current boundary: the complete grasp, lift, place, release FSM and success metrics are not implemented yet. Pure multi-episode reset passes, and one reset plus IK passes. Repeating a reset after robot motion can currently cause a native exit in the beta coupled solver and must be resolved before multi-episode task evaluation.
-
-# Template for Isaac Lab Projects
-
-## Overview
-
-This project/repository serves as a template for building projects or extensions based on Isaac Lab.
-It allows you to develop in an isolated environment, outside of the core Isaac Lab repository.
-
-**Key Features:**
-
-- `Isolation` Work outside the core Isaac Lab repository, ensuring that your development efforts remain self-contained.
-- `Flexibility` This template is set up to allow your code to be run as an extension in Omniverse.
-
-**Keywords:** extension, template, isaaclab
-
-## Installation
-
-- Install Isaac Lab by following the [installation guide](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html).
-  We recommend using the conda or uv installation as it simplifies calling Python scripts from the terminal.
-
-- Clone or copy this project/repository separately from the Isaac Lab installation (i.e. outside the `IsaacLab` directory):
-
-- Using a python interpreter that has Isaac Lab installed, install the library in editable mode using:
-
-    ```bash
-    # use 'PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
-    python -m pip install -e source/yam_ultra_deformable_place
-
-- Verify that the extension is correctly installed by:
-
-    - Listing the available tasks:
-
-        Note: It the task name changes, it may be necessary to update the search pattern `"Template-"`
-        (in the `scripts/list_envs.py` file) so that it can be listed.
-
-        ```bash
-        # use 'FULL_PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
-        python scripts/list_envs.py
-        ```
-
-    - Running a task:
-
-        ```bash
-        # use 'FULL_PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
-        python scripts/<RL_LIBRARY>/train.py --task=<TASK_NAME>
-        ```
-
-    - Running a task with dummy agents:
-
-        These include dummy agents that output zero or random agents. They are useful to ensure that the environments are configured correctly.
-
-        - Zero-action agent
-
-            ```bash
-            # use 'FULL_PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
-            python scripts/zero_agent.py --task=<TASK_NAME>
-            ```
-        - Random-action agent
-
-            ```bash
-            # use 'FULL_PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
-            python scripts/random_agent.py --task=<TASK_NAME>
-            ```
-
-### Set up IDE (Optional)
-
-To setup the IDE, please follow these instructions:
-
-- Run VSCode Tasks, by pressing `Ctrl+Shift+P`, selecting `Tasks: Run Task` and running the `setup_python_env` in the drop down menu.
-  When running this task, you will be prompted to add the absolute path to your Isaac Sim installation.
-
-If everything executes correctly, it should create a file .python.env in the `.vscode` directory.
-The file contains the python paths to all the extensions provided by Isaac Sim and Omniverse.
-This helps in indexing all the python modules for intelligent suggestions while writing code.
-
-### Setup as Omniverse Extension (Optional)
-
-We provide an example UI extension that will load upon enabling your extension defined in `source/yam_ultra_deformable_place/yam_ultra_deformable_place/ui_extension_example.py`.
-
-To enable your extension, follow these steps:
-
-1. **Add the search path of this project/repository** to the extension manager:
-    - Navigate to the extension manager using `Window` -> `Extensions`.
-    - Click on the **Hamburger Icon**, then go to `Settings`.
-    - In the `Extension Search Paths`, enter the absolute path to the `source` directory of this project/repository.
-    - If not already present, in the `Extension Search Paths`, enter the path that leads to Isaac Lab's extension directory directory (`IsaacLab/source`)
-    - Click on the **Hamburger Icon**, then click `Refresh`.
-
-2. **Search and enable your extension**:
-    - Find your extension under the `Third Party` category.
-    - Toggle it to enable your extension.
-
-## Code formatting
-
-We have a pre-commit template to automatically format your code.
-To install pre-commit:
+Headless reset check:
 
 ```bash
-pip install pre-commit
+OMNI_KIT_ACCEPT_EULA=yes ACCEPT_EULA=Y \
+/home/lightwheel-laure/embodied_ai_learning/isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/isaaclab.sh \
+-p scripts/smoke_test_integrated_task.py --visualizer none \
+--episodes 3 --steps-per-episode 60 --seed 7
 ```
 
-Then you can run pre-commit with:
+Regenerate the robot USD only when the vendored URDF or meshes change:
 
 ```bash
-pre-commit run --all-files
+OMNI_KIT_ACCEPT_EULA=yes ACCEPT_EULA=Y \
+/home/lightwheel-laure/embodied_ai_learning/isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/isaaclab.sh \
+-p scripts/convert_yam_ultra_2.py
 ```
 
-## Troubleshooting
+## Current boundary
 
-### Pylance Missing Indexing of Extensions
+The scene, randomized rigid/deformable reset, Newton two-way coupling, hard-coded inverse-kinematics grasp sequence, and 0.4 m lift check are implemented. The current check requires the deformable ball's measured center to rise by at least 85% of the commanded distance.
 
-In some VsCode versions, the indexing of part of the extensions is missing.
-In this case, add the path to your extension in `.vscode/settings.json` under the key `"python.analysis.extraPaths"`.
-
-```json
-{
-    "python.analysis.extraPaths": [
-        "<path-to-ext-repo>/source/yam_ultra_deformable_place"
-    ]
-}
-```
-
-### Pylance Crash
-
-If you encounter a crash in `pylance`, it is probable that too many files are indexed and you run out of memory.
-A possible solution is to exclude some of omniverse packages that are not used in your project.
-To do so, modify `.vscode/settings.json` and comment out packages under the key `"python.analysis.extraPaths"`
-Some examples of packages that can likely be excluded are:
-
-```json
-"<path-to-isaac-sim>/extscache/omni.anim.*"         // Animation packages
-"<path-to-isaac-sim>/extscache/omni.kit.*"          // Kit UI tools
-"<path-to-isaac-sim>/extscache/omni.graph.*"        // Graph UI tools
-"<path-to-isaac-sim>/extscache/omni.services.*"     // Services tools
-...
-```
+Isaac Lab 3.0.0 beta2 currently exits natively when this robot's two convex finger colliders simultaneously contact the Newton/VBD soft body. The stable workaround disables robot collisions and pre-declares two small surface patches of the ball as kinematic nodes during reset. When the fingers close, those patches follow the gripper frame; the remaining soft-body nodes continue to deform under Newton/VBD. Thus the current milestone validates hard-coded IK, gripper motion, soft-body deformation, and lift tracking, but it is not yet a pure frictional-contact grasp. Transport to the block, release, and placement-success evaluation remain future work.

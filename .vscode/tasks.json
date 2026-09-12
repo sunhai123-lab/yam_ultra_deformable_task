@@ -33,7 +33,7 @@
       }
     },
     {
-      "label": "Smoke: Integrated IK (headless, one episode)",
+      "label": "Task: Pick and lift 0.4 m (headless)",
       "type": "process",
       "command": "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/isaaclab.sh",
       "args": [
@@ -44,9 +44,12 @@
         "--episodes",
         "1",
         "--steps-per-episode",
-        "1",
-        "--ik-smoke-steps",
+        "60",
+        "--pick-lift",
+        "--motion-steps",
         "240",
+        "--lift-height",
+        "0.4",
         "--seed",
         "7"
       ],
@@ -75,10 +78,15 @@
         "--visualizer",
         "kit",
         "--keep-open",
+        "--pick-lift",
         "--episodes",
         "1",
         "--steps-per-episode",
-        "300",
+        "60",
+        "--motion-steps",
+        "240",
+        "--lift-height",
+        "0.4",
         "--seed",
         "7"
       ],
@@ -99,29 +107,6 @@
       "group": {
         "kind": "build",
         "isDefault": true
-      }
-    },
-    {
-      "label": "Smoke: YAM Newton only",
-      "type": "process",
-      "command": "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/isaaclab.sh",
-      "args": [
-        "-p",
-        "${workspaceFolder}/scripts/smoke_test_yam_newton.py"
-      ],
-      "options": {
-        "cwd": "${workspaceFolder}",
-        "env": {
-          "OMNI_KIT_ACCEPT_EULA": "yes",
-          "ACCEPT_EULA": "Y",
-          "PYTHONUNBUFFERED": "1"
-        }
-      },
-      "problemMatcher": [],
-      "presentation": {
-        "reveal": "always",
-        "panel": "dedicated",
-        "clear": true
       }
     },
     {
