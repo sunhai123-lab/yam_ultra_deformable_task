@@ -22,11 +22,14 @@ from pathlib import Path
 
 from isaaclab.app import AppLauncher
 
-# 命令行参数在 AppLauncher 参数之前定义；AppLauncher 随后补充 --device、--headless、
-# --visualizer 等 Isaac Lab 通用参数。
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--episodes", type=int, default=10, help="随机复位并测试的 episode 数量。")
-parser.add_argument("--steps-per-episode", type=int, default=30, help="每次复位后用于稳定场景的物理步数。")
+parser.add_argument(
+    "--steps-per-episode",
+    type=int,
+    default=30,
+    help="每次复位后至少推进的物理步数；随后继续等待动态方块满足稳定判据。",
+)
 parser.add_argument("--seed", type=int, default=7, help="物体位置随机化使用的可复现随机种子。")
 parser.add_argument("--pick-lift", action="store_true", help="执行硬编码抓取和抬升流程。")
 parser.add_argument("--motion-steps", type=int, default=240, help="每个机械臂运动阶段使用的物理步数。")
@@ -37,7 +40,6 @@ parser.add_argument("--gripper-check", action="store_true", help="固定机械�
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
-# 必须先启动 SimulationApp，再导入依赖 Kit/Omniverse 运行时的 Isaac Lab 模块。
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
@@ -74,6 +76,15 @@ BLOCK_RESET_CLEARANCE = 5.0e-4
 RIGID_STATIC_FRICTION = 0.6
 RIGID_DYNAMIC_FRICTION = 0.5
 RIGID_RESTITUTION = 0.0
+
+# 动态方块进入任务前必须真正静止，而不是仅固定等待若干步。
+BLOCK_SETTLE_LINEAR_SPEED = 5.0e-4  # m/s
+BLOCK_SETTLE_ANGULAR_SPEED = 1.0e-2  # rad/s
+BLOCK_SETTLE_CLEARANCE = 1.0e-3  # m
+BLOCK_SETTLE_REQUIRED_STEPS = 30
+BLOCK_SETTLE_TIMEOUT_STEPS = 360  # 120 Hz 下约 3 s；若最小等待更长会自动扩展
+BLOCK_DIAGNOSTIC_STEPS = (30, 60, 120, 240)
+
 BALL_RADIUS = 0.04
 BALL_DENSITY = 500.0
 BALL_YOUNGS_MODULUS = 5.0e4
@@ -132,8 +143,7 @@ def make_sim() -> SimulationContext:
             physics=DeformableNewtonCfg(
                 solver_cfg=solver_cfg,
                 model_cfg=NewtonModelCfg(
-                    # 仅保留软体接触参数。不要用 shape_material_* 全局覆盖所有刚体形状，
-                    # 否则桌面、目标方块和机械臂会共享同一组异常刚体接触参数。
+                    # 仅保留软体接触参数，避免全局 shape_material_* 污染刚体接触。
                     soft_contact_ke=1.0e4,
                     soft_contact_kd=1.0e-5,
                     soft_contact_mu=5.0,
@@ -303,8 +313,10 @@ def reset_episode(
     ball.reset()
 
 
-def block_support_metrics(block: RigidObject) -> tuple[float, float, float, bool]:
-    """返回方块底面间隙、线速度、角速度以及是否仍位于桌面有效区域。"""
+def block_support_metrics(
+    block: RigidObject,
+) -> tuple[float, tuple[float, float, float], tuple[float, float, float], bool]:
+    """返回方块底面间隙、线/角速度三个分量以及是否仍位于桌面有效区域。"""
     pose = block.data.root_link_pose_w.torch[0]
     corners = torch.tensor(
         [
@@ -319,24 +331,30 @@ def block_support_metrics(block: RigidObject) -> tuple[float, float, float, bool
     corners_w = quat_apply(pose[3:].expand(8, -1), corners) + pose[:3]
     bottom = corners_w[:, 2].min().item()
     clearance = bottom - TABLE_TOP_Z
-    linear_speed = torch.linalg.vector_norm(block.data.root_com_lin_vel_w.torch[0]).item()
-    angular_speed = torch.linalg.vector_norm(block.data.root_com_ang_vel_w.torch[0]).item()
+
+    linear_velocity = tuple(float(v) for v in block.data.root_com_lin_vel_w.torch[0].tolist())
+    angular_velocity = tuple(float(v) for v in block.data.root_com_ang_vel_w.torch[0].tolist())
+
     half_x = TABLE_SIZE[0] / 2.0 - BLOCK_SIZE[0] / 2.0
     half_y = TABLE_SIZE[1] / 2.0 - BLOCK_SIZE[1] / 2.0
     on_table_xy = (
         abs(pose[0].item() - TABLE_CENTER[0]) <= half_x
         and abs(pose[1].item() - TABLE_CENTER[1]) <= half_y
     )
-    return clearance, linear_speed, angular_speed, on_table_xy
+    return clearance, linear_velocity, angular_velocity, on_table_xy
 
 
 def check_block_support(block: RigidObject, *, stage: str) -> None:
-    """输出动态方块状态，并在方块已经离开桌面时尽早终止 episode。"""
+    """输出动态方块状态，并在方块离开桌面时尽早终止 episode。"""
     pose = block.data.root_link_pose_w.torch[0]
-    clearance, linear_speed, angular_speed, on_table_xy = block_support_metrics(block)
+    clearance, linear_velocity, angular_velocity, on_table_xy = block_support_metrics(block)
+    linear_speed = sum(v * v for v in linear_velocity) ** 0.5
+    angular_speed = sum(v * v for v in angular_velocity) ** 0.5
     print(
-        f"BLOCK_SUPPORT stage={stage} center={pose[:3].tolist()} "
-        f"clearance_m={clearance:.6f} linear_speed_mps={linear_speed:.6f} "
+        f"BLOCK_SUPPORT stage={stage} center={pose[:3].tolist()} clearance_m={clearance:.6f} "
+        f"linear_velocity_mps={[round(v, 7) for v in linear_velocity]} "
+        f"linear_speed_mps={linear_speed:.6f} "
+        f"angular_velocity_radps={[round(v, 7) for v in angular_velocity]} "
         f"angular_speed_radps={angular_speed:.6f} on_table_xy={on_table_xy}",
         flush=True,
     )
@@ -345,6 +363,23 @@ def check_block_support(block: RigidObject, *, stage: str) -> None:
             "BLOCK_INSTABILITY: dynamic target block left the tabletop "
             f"at stage={stage}, clearance={clearance:.6f}, center={pose[:3].tolist()}"
         )
+
+
+def block_state_is_settled(
+    clearance: float,
+    linear_velocity: tuple[float, float, float],
+    angular_velocity: tuple[float, float, float],
+    on_table_xy: bool,
+) -> bool:
+    """根据一次状态采样判断方块是否处于可信的桌面静止状态。"""
+    linear_speed = sum(v * v for v in linear_velocity) ** 0.5
+    angular_speed = sum(v * v for v in angular_velocity) ** 0.5
+    return (
+        on_table_xy
+        and abs(clearance) <= BLOCK_SETTLE_CLEARANCE
+        and linear_speed <= BLOCK_SETTLE_LINEAR_SPEED
+        and angular_speed <= BLOCK_SETTLE_ANGULAR_SPEED
+    )
 
 
 def step_scene(
@@ -372,6 +407,57 @@ def step_scene(
     ):
         if not torch.isfinite(value).all():
             raise RuntimeError("FAILURE: non-finite simulation state")
+
+
+def wait_until_block_settled(
+    sim: SimulationContext,
+    robot: Articulation,
+    block: RigidObject,
+    ball: DeformableObject,
+    joint_target: torch.Tensor,
+    *,
+    episode: int,
+    minimum_steps: int,
+) -> int:
+    """推进仿真直到动态方块连续满足稳定判据，返回实际使用的物理步数。"""
+    stable_steps = 0
+    timeout_steps = max(BLOCK_SETTLE_TIMEOUT_STEPS, minimum_steps + BLOCK_SETTLE_REQUIRED_STEPS)
+
+    for step_index in range(timeout_steps):
+        step_scene(sim, robot, block, ball, joint_target)
+        step_count = step_index + 1
+
+        # 每一步都 fail-fast，但只在关键节点打印完整诊断，避免控制台刷屏。
+        clearance, linear_velocity, angular_velocity, on_table_xy = block_support_metrics(block)
+        if not on_table_xy or clearance < -0.01:
+            check_block_support(block, stage=f"episode_{episode}_step_{step_count}")
+            raise RuntimeError(
+                f"BLOCK_INSTABILITY: target block became unsupported before settling in episode {episode}"
+            )
+
+        if block_state_is_settled(clearance, linear_velocity, angular_velocity, on_table_xy):
+            stable_steps += 1
+        else:
+            stable_steps = 0
+
+        if step_count in BLOCK_DIAGNOSTIC_STEPS or step_count == minimum_steps:
+            check_block_support(block, stage=f"episode_{episode}_settling_step_{step_count}")
+
+        if step_count >= minimum_steps and stable_steps >= BLOCK_SETTLE_REQUIRED_STEPS:
+            check_block_support(block, stage=f"episode_{episode}_settled_step_{step_count}")
+            print(
+                f"BLOCK_SETTLED episode={episode} steps={step_count} "
+                f"stable_steps={stable_steps} linear_threshold_mps={BLOCK_SETTLE_LINEAR_SPEED:.6f} "
+                f"angular_threshold_radps={BLOCK_SETTLE_ANGULAR_SPEED:.6f}",
+                flush=True,
+            )
+            return step_count
+
+    check_block_support(block, stage=f"episode_{episode}_settle_timeout")
+    raise RuntimeError(
+        f"BLOCK_SETTLE_TIMEOUT: episode={episode} did not remain stable for "
+        f"{BLOCK_SETTLE_REQUIRED_STEPS} consecutive steps within {timeout_steps} physics steps"
+    )
 
 
 def ball_center(ball: DeformableObject) -> torch.Tensor:
@@ -805,10 +891,15 @@ def main() -> None:
         block_pos, ball_pos = sample_object_positions(rng)
         reset_episode(robot, block, ball, block_pos, ball_pos)
 
-        for _ in range(args_cli.steps_per_episode):
-            step_scene(sim, robot, block, ball, robot.data.default_joint_pos.torch)
-
-        check_block_support(block, stage=f"episode_{episode}_settled")
+        settle_steps = wait_until_block_settled(
+            sim,
+            robot,
+            block,
+            ball,
+            robot.data.default_joint_pos.torch,
+            episode=episode,
+            minimum_steps=args_cli.steps_per_episode,
+        )
 
         if args_cli.gripper_check:
             check_gripper_motion(sim, robot, block, ball)
@@ -840,6 +931,7 @@ def main() -> None:
         results.append(
             {
                 "episode": episode,
+                "settle_steps": settle_steps,
                 "sampled_block": [round(v, 4) for v in block_pos],
                 "sampled_ball": [round(v, 4) for v in ball_pos],
                 "measured_block": [round(v, 4) for v in measured_block],
