@@ -2,7 +2,7 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Task: Physical grasp GUI (one episode)",
+      "name": "Task: Physical grasp and lift GUI (0.03 m)",
       "type": "debugpy",
       "request": "launch",
       "python": "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/env_isaaclab/bin/python",
@@ -19,7 +19,39 @@
         "--motion-steps",
         "240",
         "--lift-height",
-        "0.05",
+        "0.03",
+        "--seed",
+        "7"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": true,
+      "env": {
+        "OMNI_KIT_ACCEPT_EULA": "yes",
+        "ACCEPT_EULA": "Y",
+        "PYTHONUNBUFFERED": "1"
+      }
+    },
+    {
+      "name": "Diagnostic: Original gripper open-close GUI",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/env_isaaclab/bin/python",
+      "program": "${workspaceFolder}/scripts/smoke_test_integrated_task.py",
+      "args": [
+        "--visualizer",
+        "kit",
+        "--keep-open",
+        "--gripper-check",
+        "--episodes",
+        "1",
+        "--steps-per-episode",
+        "60",
+        "--motion-steps",
+        "240",
+        "--lift-height",
+        "0.03",
         "--seed",
         "7"
       ],
@@ -60,7 +92,7 @@
       }
     },
     {
-      "name": "Task: Physical pick and lift 0.05 m (headless)",
+      "name": "Task: Physical pick and lift 0.03 m (headless)",
       "type": "debugpy",
       "request": "launch",
       "python": "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/env_isaaclab/bin/python",
@@ -76,7 +108,7 @@
         "--motion-steps",
         "240",
         "--lift-height",
-        "0.05",
+        "0.03",
         "--seed",
         "7"
       ],

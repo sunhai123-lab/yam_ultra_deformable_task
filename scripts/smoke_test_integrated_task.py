@@ -7,12 +7,11 @@
 1. 在桌面可达区域随机化方块和球的位置；
 2. 使用项目内基于 URDF 的正运动学、雅可比矩阵和 DLS 逆运动学移动夹爪；
 3. 夹爪依次执行预抓取、下降、闭合和抬升；
-4. 使用简化盒形夹指碰撞垫与软球产生法向接触和 Coulomb 摩擦；
+4. 使用原始夹指碰撞网格与软球产生法向接触和 Coulomb 摩擦；
 5. 通过有限值、FK 对齐误差和球心实际抬升量判断测试是否成功。
 
-原始 YAM USD 的碰撞体由高面数视觉网格自动生成；当前 Isaac Lab/Newton beta 在两个
-复杂凸包同时接触软体时不稳定。因此保留原始可视网格，但关闭其碰撞，改用固定在左右
-夹指 link 下的简单盒形碰撞垫。球体的全部节点始终是自由动力学节点，不使用节点绑定。
+保留原始 YAM 视觉与碰撞资产，不添加夹指板，不使用节点绑定。
+开合方向由原始指尖内侧几何验证；接触与完整抓取尚需分阶段运行验收。
 """
 
 from __future__ import annotations
@@ -31,8 +30,10 @@ parser.add_argument("--steps-per-episode", type=int, default=30, help="每次复
 parser.add_argument("--seed", type=int, default=7, help="物体位置随机化使用的可复现随机种子。")
 parser.add_argument("--pick-lift", action="store_true", help="执行硬编码抓取和抬升流程。")
 parser.add_argument("--motion-steps", type=int, default=240, help="每个机械臂运动阶段使用的物理步数。")
-parser.add_argument("--lift-height", type=float, default=0.05, help="球心期望沿世界 Z 轴抬升的距离，单位 m。")
+parser.add_argument("--lift-height", type=float, default=0.03, help="球心期望沿世界 Z 轴抬升的距离，单位 m。")
 parser.add_argument("--keep-open", action="store_true", help="测试结束后保持 Kit GUI，直到手动关闭窗口。")
+parser.add_argument("--stop-after-hold", action="store_true", help="只验收到闭合保持阶段，不抬升。")
+parser.add_argument("--gripper-check", action="store_true", help="固定机械臂，检查原始夹指张开—闭合—张开，不接近球。")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -77,39 +78,27 @@ BALL_RADIUS = 0.04
 BALL_DENSITY = 500.0
 BALL_YOUNGS_MODULUS = 5.0e4
 BALL_POISSONS_RATIO = 0.35
-# 受控抓取点位于 gripper link 坐标系的 -Z 方向 0.10 m，即两根夹指之间。
-GRASP_POINT_LOCAL = (0.0, 0.0, -0.10)
+# 受控抓取点位于 gripper link 坐标系的 -Z 方向 0.125 m，即两根夹指之间。
+GRASP_POINT_LOCAL = (0.0, 0.0, -0.125)
 # 预抓取/抓取阶段的世界系末端朝向：夹爪从球体正上方向下接近。
 GRASP_ROTATION_W = ((-1.0, 0.0, 0.0), (0.0, -1.0, 0.0), (0.0, 0.0, 1.0))
-# 简化碰撞垫只替代原高面数碰撞凸包；它们固定在真实 tip_left/tip_right link 上。
-# 夹持轴方向厚度仅 4 mm，使最大张开时的净间隙约 85 mm，大于离散软球约
-# 81--82 mm 的实际宽度；这样下降阶段不会在闭合命令之前擦碰并推走球。
-GRIPPER_PAD_SIZE = (0.040, 0.004, 0.065)
-# USD 转换器把 tip prim 的原点烘焙到了夹指网格坐标系，因此下面是 ContactPad
-# 相对“转换后 tip prim”的坐标，不能直接填写 URDF link 坐标。它们经 tip
-# 的固定变换后，在夹爪坐标系中分别位于 (0, -0.0445119, -0.10) 和
-# (0, +0.0445119, -0.10)；即张开时位于球的两侧，而不是球上方。
-LEFT_PAD_LOCAL_POS = (0.0140000, 0.0914614, -0.1730911)
-RIGHT_PAD_LOCAL_POS = (0.0140000, 0.0013375, -0.1731001)
+# 原始网格内侧平面上的测量点，不生成几何体。坐标表达在转换后 USD tip frame。
+LEFT_PAD_LOCAL_POS = (0.014, 0.0469184183, -0.1980911)
+RIGHT_PAD_LOCAL_POS = (0.014, 0.0458805300, -0.1981001)
 LEFT_TIP_PATH = "/World/env_0/Robot/Geometry/base/link1/link2/link3/link4/link5/gripper/tip_left"
 RIGHT_TIP_PATH = "/World/env_0/Robot/Geometry/base/link1/link2/link3/link4/link5/gripper/tip_right"
 
-# joint7、joint8 的 URDF 范围为 [-0.04695, 0]；0 表示最大张开，负值向球体闭合。
-GRIPPER_OPEN_POSITION = 0.0
-# q=0 时两夹指关节中心相距 2*0.0445119 m；减去两碰撞垫的总半厚度得到净开口。
-GRIPPER_OPEN_GAP = 2.0 * 0.0445119 - GRIPPER_PAD_SIZE[1]
-# 用简化线弹性关系 epsilon=sigma/E_eff 决定压缩率。8 kPa 对当前材料约为 14% 压缩；
-# 该应力量级相对 50 kPa 杨氏模量仍处于小变形估算范围。
-NOMINAL_GRIP_STRESS = 8.0e3
+# 网格而非关节原点决定开口：q=0 几乎闭合；负向行程使真实指尖向外运动。
+GRIPPER_OPEN_POSITION = -0.04695
+GRIPPER_CLOSED_GAP = 0.00006211
+GRIPPER_OPEN_GAP = GRIPPER_CLOSED_GAP - 2.0 * GRIPPER_OPEN_POSITION
+# 仅用于产生初始闭合目标的经验估算，不是球体接触力学解或材质自动标定。
+NOMINAL_GRIP_STRESS = 5.0e3
 BALL_EFFECTIVE_MODULUS = BALL_YOUNGS_MODULUS / (1.0 - BALL_POISSONS_RATIO**2)
-BALL_COMPRESSION_RATIO = min(0.18, NOMINAL_GRIP_STRESS / BALL_EFFECTIVE_MODULUS)
+BALL_COMPRESSION_RATIO = min(0.12, NOMINAL_GRIP_STRESS / BALL_EFFECTIVE_MODULUS)
 GRIPPER_TARGET_GAP = 2.0 * BALL_RADIUS * (1.0 - BALL_COMPRESSION_RATIO)
-# 两根对称夹指各承担一半开口变化；负号来自 YAM prismatic joint 的闭合方向。
-GRIPPER_GRASP_POSITION = -0.5 * (GRIPPER_OPEN_GAP - GRIPPER_TARGET_GAP)
-# 可变形球在夹持中存在压缩和微滑移；第一里程碑要求球心实际位移达到末端命令的
-# 70%，并以真实节点位移而非夹爪命令作为判据。该阈值用于判定“已抓离桌面”，
-# 不代表后续 0.4 m 运输阶段的位置精度标准。
-MIN_LIFT_RATIO = 0.70
+GRIPPER_GRASP_POSITION = -0.5 * (GRIPPER_TARGET_GAP - GRIPPER_CLOSED_GAP)
+MIN_LIFT_RATIO = 0.85
 # 该初值位于“夹爪竖直向下、肘部远离桌面”的可达 IK 分支。它不是固定动作结果；
 # 每个 episode 仍会根据随机球坐标重新迭代求解关节角。
 APPROACH_IK_SEED = (-0.48, 1.97, 1.63, -1.23, 0.0, -0.48)
@@ -228,33 +217,17 @@ def spawn_scene() -> tuple[Articulation, RigidObject, DeformableObject]:
             "gripper": ImplicitActuatorCfg(
                 joint_names_expr=["joint[7-8]"],
                 # 夹爪仍由关节驱动和接触反力决定运动，并非直接改写关节位置。
-                # 6 kN/m 刚度使实际间隙能在软球反力下收敛到材料模型给出的目标，
-                # 而 150 N·s/m 阻尼抑制接触瞬间的回弹。
-                effort_limit_sim=80.0,
-                velocity_limit_sim=0.5,
-                stiffness=6000.0,
-                damping=150.0,
+                # 有限夹持力与低速闭合；待隔离接触实验后再标定执行器。
+                effort_limit_sim=15.0,
+                velocity_limit_sim=0.01,
+                stiffness=1000.0,
+                damping=50.0,
             ),
         },
     )
     robot = Articulation(robot_cfg)
-    # 导入 USD 使用实例化 prim；解除实例化后才能递归修改碰撞并添加简化碰撞垫。
-    sim_utils.make_uninstanceable("/World/env_0/Robot")
-    # 关闭视觉网格自动生成的所有高面数凸包碰撞体。
-    sim_utils.modify_collision_properties(
-        "/World/env_0/Robot",
-        sim_utils.CollisionPropertiesCfg(collision_enabled=False),
-    )
-    # 只在真实左右夹指 link 下添加简单盒形碰撞垫。它们随 prismatic joint 运动，
-    # 接触力和摩擦由 Newton 求解，不会直接修改或绑定软球节点。
-    pad_cfg = sim_utils.CuboidCfg(
-        size=GRIPPER_PAD_SIZE,
-        collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
-        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.15, 0.15, 0.15)),
-    )
-    pad_cfg.func(f"{LEFT_TIP_PATH}/ContactPad", pad_cfg, translation=LEFT_PAD_LOCAL_POS)
-    pad_cfg.func(f"{RIGHT_TIP_PATH}/ContactPad", pad_cfg, translation=RIGHT_PAD_LOCAL_POS)
-
+    # 恢复原始机器人碰撞网格；不创建 ContactPad，也不隐藏额外板来冒充原始指尖。
+    # collision_from_visuals 生成的 convexHull 仍是近似碰撞体，需要单独验证接触。
     block = RigidObject(
         RigidObjectCfg(
             prim_path="/World/env_0/TargetBlock",
@@ -391,6 +364,14 @@ def step_scene(
     robot.update(dt)
     block.update(dt)
     ball.update(dt)
+    for value in (
+        robot.data.joint_pos.torch,
+        robot.data.joint_vel.torch,
+        block.data.root_pos_w.torch,
+        ball.data.nodal_state_w.torch,
+    ):
+        if not torch.isfinite(value).all():
+            raise RuntimeError("FAILURE: non-finite simulation state")
 
 
 def ball_center(ball: DeformableObject) -> torch.Tensor:
@@ -398,8 +379,8 @@ def ball_center(ball: DeformableObject) -> torch.Tensor:
     return ball.data.nodal_pos_w.torch.mean(dim=1)
 
 
-def gripper_pad_centers(robot: Articulation) -> torch.Tensor:
-    """根据左右 tip link 位姿计算两个简化碰撞垫的世界坐标中心。"""
+def finger_surface_points(robot: Articulation) -> torch.Tensor:
+    """根据原始指尖内侧表面测量点计算世界坐标，不创建额外几何体。"""
     tip_indices = [robot.body_names.index("tip_left"), robot.body_names.index("tip_right")]
     tip_poses_w = robot.data.body_link_pose_w.torch[0, tip_indices]
     local_centers = torch.tensor(
@@ -413,17 +394,17 @@ def gripper_pad_centers(robot: Articulation) -> torch.Tensor:
 def grasp_geometry_metrics(robot: Articulation, ball: DeformableObject) -> tuple[float, float]:
     """返回夹持轴上的实际夹爪净间隙和软球宽度，单位 m。
 
-    夹持轴由两个碰撞垫中心连线定义，所以即使末端存在少量姿态误差，
+    夹持轴由两个原始指尖内侧测量点连线定义，所以即使末端存在少量姿态误差，
     也不会错把世界 Y 轴宽度当成球的受压宽度。
     """
-    pad_centers = gripper_pad_centers(robot)
+    pad_centers = finger_surface_points(robot)
     center_delta = pad_centers[1] - pad_centers[0]
     center_distance = torch.linalg.vector_norm(center_delta)
     grasp_axis = center_delta / center_distance.clamp_min(1.0e-8)
     node_projections = ball.data.nodal_pos_w.torch[0] @ grasp_axis
     ball_width = node_projections.max() - node_projections.min()
-    # GRIPPER_PAD_SIZE[1] 是两个对向盒形垫沿夹持轴的单个厚度。
-    surface_gap = center_distance - GRIPPER_PAD_SIZE[1]
+    # 测量点位于原始内侧表面，无需再减去虚构碰撞垫厚度。
+    surface_gap = center_distance
     return surface_gap.item(), ball_width.item()
 
 
@@ -485,7 +466,10 @@ def move_grasp_point(
     else:
         target_rot_w = target_rotation_w
 
-    for step in range(num_steps):
+    _, _, start_pos, _ = grasp_point_kinematics(robot.data.root_link_pose_w.torch, robot.data.joint_pos.torch[:, :6])
+    travel_steps = max(num_steps, int(torch.linalg.vector_norm(target_pos_w - start_pos).item() / 0.0005) + 1)
+    for step in range(travel_steps + 60):
+        waypoint = start_pos + min(1.0, (step + 1) / travel_steps) * (target_pos_w - start_pos)
         root_pose_w = robot.data.root_link_pose_w.torch
         arm_pos = robot.data.joint_pos.torch[:, :6]
         gripper_pos_w, gripper_rot_w, grasp_pos_w, grasp_geometric_jacobian_w = grasp_point_kinematics(
@@ -499,7 +483,7 @@ def move_grasp_point(
         if maintain_orientation:
             joint_delta = damped_least_squares_pose_step(
                 grasp_pos_w,
-                target_pos_w,
+                waypoint,
                 gripper_rot_w,
                 target_rot_w,
                 grasp_geometric_jacobian_w,
@@ -508,7 +492,7 @@ def move_grasp_point(
         else:
             joint_delta = damped_least_squares_position_step(
                 grasp_pos_w,
-                target_pos_w,
+                waypoint,
                 grasp_geometric_jacobian_w[:, :3, :],
                 damping=0.05,
             )
@@ -600,22 +584,43 @@ def hold_grasp(
     gripper_start: float,
     gripper_end: float,
     num_steps: int,
-    target_rotation_w: torch.Tensor,
+    target_rotation_w: torch.Tensor | None,
 ) -> None:
     """保持抓取点位姿，同时把两个夹指从 ``gripper_start`` 线性闭合到终值。"""
-    for step in range(num_steps):
-        alpha = (step + 1) / num_steps
-        gripper_target = gripper_start + alpha * (gripper_end - gripper_start)
-        move_grasp_point(
-            sim,
-            robot,
-            block,
-            ball,
-            target_pos_w,
-            gripper_target,
-            num_steps=1,
-            target_rotation_w=target_rotation_w,
-        )
+    # 独立夹爪控制：机械臂目标固定，最大闭合速度 5 mm/s，不调用 IK。
+    target = robot.data.joint_pos.torch.clone()
+    steps = max(num_steps, int(abs(gripper_end - gripper_start) / (0.005 * sim.get_physics_dt())) + 1)
+    for step in range(steps):
+        target[:, 6:] = gripper_start + (gripper_end - gripper_start) * (step + 1) / steps
+        step_scene(sim, robot, block, ball, target)
+
+
+def check_gripper_motion(sim, robot, block, ball):
+    """固定机械臂，原始夹指闭合后张开；不接近球。"""
+    print("STATE=GRIPPER_CHECK", flush=True)
+    gaps = []
+    for start, end in ((GRIPPER_OPEN_POSITION, 0.0), (0.0, GRIPPER_OPEN_POSITION)):
+        hold_grasp(sim, robot, block, ball, ball_center(ball), start, end, 240, None)
+        target = robot.data.joint_pos.torch.clone()
+        target[:, 6:] = end
+        for _ in range(120):
+            step_scene(sim, robot, block, ball, target)
+        gap, _ = grasp_geometry_metrics(robot, ball)
+        gaps.append(gap)
+        print(f"FINGER_TARGET={end:.5f} ACTUAL={robot.data.joint_pos.torch[0,6:].tolist()} GAP={gap:.6f}", flush=True)
+    if gaps[0] > 0.005 or gaps[1] < 0.085:
+        raise RuntimeError(f"FAILURE: finger open/close geometry: {gaps}")
+    print("GRIPPER_CHECK_OK", flush=True)
+
+
+def check_ball_in_gripper(robot, ball):
+    """区域和形变门控，不等同于已确认双侧接触力。"""
+    middle = finger_surface_points(robot).mean(dim=0)
+    if torch.linalg.vector_norm(ball_center(ball)[0] - middle).item() > 0.025:
+        raise RuntimeError("FAILURE: ball left finger region")
+    extent = ball.data.nodal_pos_w.torch[0].amax(dim=0) - ball.data.nodal_pos_w.torch[0].amin(dim=0)
+    if extent.min().item() < BALL_RADIUS * 0.6 or extent.max().item() > BALL_RADIUS * 3.0:
+        raise RuntimeError("FAILURE: excessive deformation")
 
 
 def pick_and_lift_ball(
@@ -648,7 +653,7 @@ def pick_and_lift_ball(
     approach_rotation_w = torch.tensor(GRASP_ROTATION_W, device=device, dtype=dtype).unsqueeze(0)
 
     # 阶段 1：先从已知安全分支离线反解，再以夹爪张开的关节轨迹移动到球上方。
-    # 该高度即使叠加约 1 cm 的关节跟踪误差，碰撞垫底面与球顶仍有安全余量。
+    # 该高度即使叠加约 1 cm 的关节跟踪误差，原始指尖底面与球顶仍有安全余量。
     pregrasp_joint_target, solved_position_error, solved_rotation_error = solve_approach_joint_target(
         robot,
         pregrasp_target,
@@ -708,8 +713,14 @@ def pick_and_lift_ball(
         f"PICK_LIFT_STAGE=pregrasp error_m={pregrasp_error:.6f} " f"ball_center={ball_center(ball)[0].cpu().tolist()}",
         flush=True,
     )
-    print(f"GRIPPER_PAD_CENTERS_PREGRASP={gripper_pad_centers(robot).cpu().tolist()}", flush=True)
+    print(f"FINGER_SURFACE_POINTS_PREGRASP={finger_surface_points(robot).cpu().tolist()}", flush=True)
 
+    if pregrasp_error > 0.005:
+        raise RuntimeError(f"FAILURE PRE_GRASP: tracking error {pregrasp_error}")
+    gap, width = grasp_geometry_metrics(robot, ball)
+    if gap < width + 0.005:
+        raise RuntimeError(f"FAILURE OPEN: gap={gap}, width={width}")
+    print("STATE=DESCEND", flush=True)
     # 阶段 2：用最新球心坐标对心，保持夹爪张开和当前姿态垂直下降。
     grasp_target = ball_center(ball).clone()
     grasp_error, _ = move_grasp_point(
@@ -726,7 +737,11 @@ def pick_and_lift_ball(
         f"PICK_LIFT_STAGE=grasp error_m={grasp_error:.6f} " f"ball_center={ball_center(ball)[0].cpu().tolist()}",
         flush=True,
     )
-    print(f"GRIPPER_PAD_CENTERS_OPEN={gripper_pad_centers(robot).cpu().tolist()}", flush=True)
+    print(f"FINGER_SURFACE_POINTS_OPEN={finger_surface_points(robot).cpu().tolist()}", flush=True)
+    if grasp_error > 0.005:
+        raise RuntimeError(f"FAILURE DESCEND: tracking error {grasp_error}")
+    check_ball_in_gripper(robot, ball)
+    print("STATE=CLOSE_GRIPPER", flush=True)
     # 阶段 3：末端保持不动，joint7/8 平滑闭合。
     hold_grasp(
         sim,
@@ -744,7 +759,7 @@ def pick_and_lift_ball(
         f"finger_joints={robot.data.joint_pos.torch[0, 6:].cpu().tolist()}",
         flush=True,
     )
-    print(f"GRIPPER_PAD_CENTERS_CLOSED={gripper_pad_centers(robot).cpu().tolist()}", flush=True)
+    print(f"FINGER_SURFACE_POINTS_CLOSED={finger_surface_points(robot).cpu().tolist()}", flush=True)
 
     # 阶段 4：保持闭合，让接触和软体形变充分收敛后再抬升。
     measured_gap, ball_width_after_grasp = grasp_geometry_metrics(robot, ball)
@@ -755,11 +770,17 @@ def pick_and_lift_ball(
     )
     closed_target = robot.data.joint_pos.torch.clone()
     closed_target[:, 6:] = GRIPPER_GRASP_POSITION
-    for _ in range(60):
+    print("STATE=HOLD", flush=True)
+    for _ in range(120):
         step_scene(sim, robot, block, ball, closed_target)
+        check_ball_in_gripper(robot, ball)
 
+    if args_cli.stop_after_hold:
+        print("CLOSE_HOLD_COMPLETED_NOT_LIFT_SUCCESS", flush=True)
+        return {"hold_only": 1.0}
     # 阶段 5：从当前抓取点沿世界 Z 轴直接抬升，并保持闭合时的可达姿态。
     # 这避免了旧实现切换到另一个 IK 关节分支而产生的横向扫动。
+    print("STATE=LIFT", flush=True)
     center_before_lift = ball_center(ball).clone()
     _, _, grasp_before_lift, _ = grasp_point_kinematics(
         robot.data.root_link_pose_w.torch,
@@ -778,14 +799,19 @@ def pick_and_lift_ball(
         target_rotation_w=approach_rotation_w,
     )
     print(
-        f"PICK_LIFT_STAGE=lift error_m={lift_error:.6f} "
-        f"ball_center={ball_center(ball)[0].cpu().tolist()}",
+        f"PICK_LIFT_STAGE=lift error_m={lift_error:.6f} " f"ball_center={ball_center(ball)[0].cpu().tolist()}",
         flush=True,
     )
     final_target = robot.data.joint_pos.torch.clone()
     final_target[:, 6:] = GRIPPER_GRASP_POSITION
+    # 连续一秒离桌、保持在夹爪内；不根据实验结果下调 85% 位移判据。
     for _ in range(120):
         step_scene(sim, robot, block, ball, final_target)
+        check_ball_in_gripper(robot, ball)
+        lowest = ball.data.nodal_pos_w.torch[..., 2].min().item() - 0.006
+        rise = (ball_center(ball)[:, 2] - center_before_lift[:, 2]).item()
+        if lowest < TABLE_TOP_Z + 0.002 or rise < lift_height * MIN_LIFT_RATIO:
+            raise RuntimeError(f"FAILURE LIFT_HOLD: bottom={lowest}, rise={rise}")
 
     # 使用球体全部节点的平均 Z 位移，而不是夹爪命令位移，作为真实完成指标。
     center_after_lift = ball_center(ball)
@@ -814,7 +840,13 @@ def main() -> None:
     if args_cli.pick_lift and args_cli.episodes != 1:
         raise ValueError("--pick-lift currently supports exactly one episode")
 
+    if args_cli.gripper_check and (args_cli.pick_lift or args_cli.episodes != 1):
+        raise ValueError("--gripper-check requires --episodes 1 and no --pick-lift")
+    if args_cli.stop_after_hold and not args_cli.pick_lift:
+        raise ValueError("--stop-after-hold requires --pick-lift")
     # SimulationContext 必须先创建，再生成使用该后端的资产，最后统一 reset 初始化。
+    mode = 'GRIPPER_CHECK (arm fixed)' if args_cli.gripper_check else ('PICK_LIFT' if args_cli.pick_lift else 'RESET_ONLY (arm fixed)')
+    print(f"RUN_MODE={mode}", flush=True)
     sim = make_sim()
     sim.set_camera_view(eye=(1.25, -1.20, 1.15), target=(0.12, 0.0, TABLE_TOP_Z))
     robot, block, ball = spawn_scene()
@@ -836,6 +868,10 @@ def main() -> None:
         for _ in range(args_cli.steps_per_episode):
             step_scene(sim, robot, block, ball, robot.data.default_joint_pos.torch)
 
+        report_block_clearance(block)
+
+        if args_cli.gripper_check:
+            check_gripper_motion(sim, robot, block, ball)
         if args_cli.pick_lift:
             settled_ball_pos = tuple(ball_center(ball)[0].cpu().tolist())
             pick_lift_result = pick_and_lift_ball(
@@ -874,7 +910,7 @@ def main() -> None:
     print("YAM_KINEMATICS=project URDF-derived Torch FK/Jacobian")
     for result in results:
         print(f"RESET_RESULT={result}")
-    if pick_lift_result is not None:
+    if pick_lift_result is not None and not pick_lift_result.get("hold_only"):
         print(f"PICK_LIFT_RESULT={pick_lift_result}")
         if pick_lift_result["fk_alignment_error_m"] > 0.002:
             raise RuntimeError(f"URDF FK does not align with the simulated gripper: {pick_lift_result}")
@@ -895,9 +931,25 @@ def main() -> None:
             step_scene(sim, robot, block, ball, hold_target)
 
 
+def report_block_clearance(block: RigidObject) -> None:
+    """用八个角点计算实际底面，避免将旋转方块的球心/质心误当作底面。"""
+    pose = block.data.root_link_pose_w.torch[0]
+    corners = torch.tensor(
+        [(x * BLOCK_SIZE[0] / 2, y * BLOCK_SIZE[1] / 2, z * BLOCK_SIZE[2] / 2)
+         for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)],
+        device=pose.device, dtype=pose.dtype)
+    corners_w = quat_apply(pose[3:].expand(8, -1), corners) + pose[:3]
+    bottom = corners_w[:, 2].min().item()
+    print(f"BLOCK_SUPPORT center={pose[:3].tolist()} bottom_z={bottom:.6f} "
+          f"table_top_z={TABLE_TOP_Z:.6f} clearance_m={bottom - TABLE_TOP_Z:.6f}", flush=True)
+
+
 if __name__ == "__main__":
     try:
         main()
+    except Exception as exc:
+        print(f"GRASP_FAILURE={type(exc).__name__}: {exc}", flush=True)
+        raise
     finally:
         # 即使 Python 抛出异常也显式释放 Kit、CUDA 和 USD 资源。
         simulation_app.close()

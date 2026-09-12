@@ -22,7 +22,7 @@ The expected Isaac Lab installation and exact versions are recorded in `VERSIONS
 
 ## Run
 
-Open this directory as the VS Code workspace. Ctrl+Shift+B runs the GUI physical-grasp milestone. F5 exposes GUI, headless reset, and headless physical-grasp configurations.
+Open this directory as the VS Code workspace. Ctrl+Shift+B runs the isolated original-gripper diagnostic. F5 exposes GUI, headless reset, and headless physical-grasp configurations.
 
 Equivalent GUI command:
 
@@ -30,18 +30,18 @@ Equivalent GUI command:
 OMNI_KIT_ACCEPT_EULA=yes ACCEPT_EULA=Y \
 /home/lightwheel-laure/embodied_ai_learning/isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/isaaclab.sh \
 -p scripts/smoke_test_integrated_task.py --visualizer kit --keep-open \
---episodes 1 --steps-per-episode 60 --pick-lift \
---motion-steps 240 --lift-height 0.05 --seed 7
+--episodes 1 --steps-per-episode 60 --gripper-check \
+--motion-steps 240 --lift-height 0.03 --seed 7
 ```
 
-Headless 0.05 m physical grasp-and-lift check:
+Headless 0.03 m physical grasp-and-lift check:
 
 ```bash
 OMNI_KIT_ACCEPT_EULA=yes ACCEPT_EULA=Y \
 /home/lightwheel-laure/embodied_ai_learning/isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/isaaclab.sh \
 -p scripts/smoke_test_integrated_task.py --visualizer none \
 --episodes 1 --steps-per-episode 60 --pick-lift \
---motion-steps 240 --lift-height 0.05 --seed 7
+--motion-steps 240 --lift-height 0.03 --seed 7
 ```
 
 Headless reset check:
@@ -63,8 +63,8 @@ OMNI_KIT_ACCEPT_EULA=yes ACCEPT_EULA=Y \
 
 ## Current boundary
 
-The first physical-grasp milestone is implemented: randomized rigid/deformable reset, deterministic IK from a reachable top-down branch, open approach, descent, material-dependent finger closure, and vertical lift under Newton two-way coupling.
+The previous physical-grasp success claim is withdrawn: it used added collision plates with an incorrect open/close convention. The script now uses the original robot collision meshes and no added plates. q=-0.04695 opens the fingers; q=0 closes them.
 
-The generated robot's high-complexity convex finger colliders are disabled because simultaneous contact with the Newton/VBD body is unstable in this Isaac Lab beta. Two simple box collision pads are attached to the real tip_left and tip_right rigid links instead. All soft-body nodes remain free (free_flag=1) throughout the run; there is no node binding, kinematic attachment, or scripted ball following. The ball moves only through simulated normal contact and Coulomb friction.
+Ctrl+Shift+B and the first F5 entry now run the isolated original-gripper open/close diagnostic, not a grasp. The headless grasp entry commands 3 cm. Contact stability and lift with the original fingers remain unverified.
 
-The current default command is a 0.05 m lift. This first-stage "clear the table" check requires the measured soft-ball center to rise by at least 70% of the commanded end-effector displacement, allowing for elastic compression, mesh variation, and small physical slip. The latest headless run raised the center by 0.03784 m and maintained it above the table. A collision-safe 0.4 m transport path, release above the rigid block, and placement-success evaluation remain future milestones.
+See [the revised plan](docs/grasp_revision_plan.md) for geometric evidence, staged commands, acceptance criteria, and limitations. For close/hold only use --pick-lift --stop-after-hold --episodes 1; for the isolated open/close diagnostic use --gripper-check --episodes 1.
