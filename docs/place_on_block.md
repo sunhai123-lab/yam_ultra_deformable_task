@@ -1,5 +1,7 @@
 # 抓球并放到刚体方块顶面
 
+当前分阶段速度和等待逻辑已优化，见 [流程提速说明](flow_speed.md)；连续随机运行见 [多轮 episode](multi_episode.md)。下文单轮验证数据为历史记录。
+
 ## 运行
 
 - Ctrl+Shift+B 默认执行 `Task: Place ball on block GUI`。
@@ -12,7 +14,7 @@
 OMNI_KIT_ACCEPT_EULA=yes ACCEPT_EULA=Y \
 ../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/isaaclab.sh \
 -p scripts/smoke_test_integrated_task.py \
---visualizer kit --keep-open --episodes 1 --steps-per-episode 60 \
+--visualizer kit --keep-open --episodes 3 --steps-per-episode 60 \
 --pick-lift --place-on-block --lift-height 0.03 --seed 7
 ```
 

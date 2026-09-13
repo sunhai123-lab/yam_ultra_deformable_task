@@ -1,5 +1,7 @@
 # 原地平稳放回
 
+当前分阶段速度和等待逻辑见 [流程提速说明](flow_speed.md)。下文速度和验证数据保留为提速前的历史记录。
+
 ## 运行
 
 F5 选择 `Task: Physical grasp and put back GUI (0.03 m)`；Ctrl+Shift+B 默认运行同一流程。
