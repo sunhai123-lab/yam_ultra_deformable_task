@@ -85,6 +85,15 @@ YAM_USD = PROJECT_ROOT / "assets/generated/yam_ultra_2/yam_ultra/yam_ultra.usda"
 TABLE_SIZE = (1.10, 0.75, 0.08)
 TABLE_CENTER = (0.12, 0.0, 0.40)
 TABLE_TOP_Z = TABLE_CENTER[2] + TABLE_SIZE[2] / 2.0
+# 随机区域采用世界坐标。机器人基座位于 (-0.22, 0.0)，两个 Y 区间分居基座前方两侧。
+BLOCK_X_RANGE = (-0.02, 0.28)
+BLOCK_Y_RANGE = (0.06, 0.26)
+BALL_X_RANGE = (-0.02, 0.28)
+BALL_Y_RANGE = (-0.26, -0.06)
+SAMPLE_REACH_RADIUS = (0.20, 0.40)
+MIN_OBJECT_PLANAR_DISTANCE = 0.18
+SAMPLING_MAX_ATTEMPTS = 100
+ROBOT_BASE_XY = (-0.22, 0.0)
 BLOCK_SIZE = (0.07, 0.07, 0.05)
 BLOCK_RESET_CLEARANCE = 5.0e-4
 RIGID_STATIC_FRICTION = 0.6
@@ -140,6 +149,7 @@ QUICK_GRASP_TIMEOUT_STEPS = 120  # 最多等待 1 s，未稳定则明确失败�
 PLACE_CONTACT_CLEARANCE = 0.0005  # 球的接触包络距桌面不超过 0.5 mm 才松爪。
 PLACE_POSITION_TOLERANCE = 0.005  # 放回位置的水平误差上限 5 mm。
 PLACE_RELEASE_DRIFT = 0.003  # 松爪到撤离/稳定期间相对松爪位置最大漂移 3 mm。
+BLOCK_PLACEMENT_MAX_DISPLACEMENT = 0.004  # 放球受力后允许方块平移 4 mm。
 GRIPPER_CLOSED_GAP = 0.00006211
 GRIPPER_OPEN_GAP = GRIPPER_CLOSED_GAP - 2.0 * GRIPPER_OPEN_POSITION
 NOMINAL_GRIP_STRESS = 5.0e3
@@ -307,20 +317,29 @@ def spawn_scene() -> tuple[Articulation, RigidObject, DeformableObject]:
 
 
 def sample_object_positions(rng: random.Random) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
-    block_pos = (
-        rng.uniform(0.02, 0.16),
-        rng.uniform(0.08, 0.18),
-        TABLE_TOP_Z + BLOCK_SIZE[2] / 2.0 + BLOCK_RESET_CLEARANCE,
+    """在扩大的桌面区域内采样，并剔除过近或超出机械臂水平工作半径的组合。"""
+
+    def reachable(point_xy):
+        radius = ((point_xy[0] - ROBOT_BASE_XY[0]) ** 2 + (point_xy[1] - ROBOT_BASE_XY[1]) ** 2) ** 0.5
+        return SAMPLE_REACH_RADIUS[0] <= radius <= SAMPLE_REACH_RADIUS[1]
+
+    for _ in range(SAMPLING_MAX_ATTEMPTS):
+        block_pos = (
+            rng.uniform(*BLOCK_X_RANGE),
+            rng.uniform(*BLOCK_Y_RANGE),
+            TABLE_TOP_Z + BLOCK_SIZE[2] / 2.0 + BLOCK_RESET_CLEARANCE,
+        )
+        ball_pos = (
+            rng.uniform(*BALL_X_RANGE),
+            rng.uniform(*BALL_Y_RANGE),
+            TABLE_TOP_Z + BALL_RADIUS,
+        )
+        planar_distance = ((block_pos[0] - ball_pos[0]) ** 2 + (block_pos[1] - ball_pos[1]) ** 2) ** 0.5
+        if planar_distance >= MIN_OBJECT_PLANAR_DISTANCE and reachable(block_pos[:2]) and reachable(ball_pos[:2]):
+            return block_pos, ball_pos
+    raise RuntimeError(
+        "Could not sample reachable object positions; check random ranges, reach radius, and minimum distance"
     )
-    ball_pos = (
-        rng.uniform(0.02, 0.16),
-        rng.uniform(-0.18, -0.08),
-        TABLE_TOP_Z + BALL_RADIUS,
-    )
-    planar_distance = ((block_pos[0] - ball_pos[0]) ** 2 + (block_pos[1] - ball_pos[1]) ** 2) ** 0.5
-    if planar_distance < 0.13:
-        raise RuntimeError(f"Sampling regions unexpectedly overlap: distance={planar_distance:.3f} m")
-    return block_pos, ball_pos
 
 
 def reset_episode(
@@ -343,9 +362,7 @@ def reset_episode(
     block.write_root_velocity_to_sim_index(root_velocity=torch.zeros((1, 6), device=block_pose.device))
 
     # 第 1 轮使用原始网格自然沉降；后续轮次复用已落桌的自由形状，避免重复滚动等待。
-    nodal_state = (
-        ball.data.default_nodal_state_w.torch.clone() if ball_template is None else ball_template.clone()
-    )
+    nodal_state = ball.data.default_nodal_state_w.torch.clone() if ball_template is None else ball_template.clone()
     positions = nodal_state[..., :3]
     current_center = positions.mean(dim=1)
     desired_xy = torch.tensor(ball_pos[:2], device=positions.device, dtype=positions.dtype).unsqueeze(0)
@@ -792,8 +809,11 @@ def quick_grasp_check(sim, robot, block, ball, *, center_before_lift=None, requi
             lift_ok = lowest >= TABLE_TOP_Z + 0.002 and rise >= required_lift * MIN_LIFT_RATIO
         stable = stable + 1 if enveloped and finger_stopped and relative_speed <= 0.003 and lift_ok else 0
         if stable >= QUICK_GRASP_STABLE_STEPS:
-            print(f"QUICK_GRASP_OK lifted={center_before_lift is not None} steps={index + 1} "
-                  f"sim_s={(index + 1) * sim.get_physics_dt():.3f}", flush=True)
+            print(
+                f"QUICK_GRASP_OK lifted={center_before_lift is not None} steps={index + 1} "
+                f"sim_s={(index + 1) * sim.get_physics_dt():.3f}",
+                flush=True,
+            )
             return
     raise RuntimeError("FAILURE QUICK_GRASP: grip/relative motion/lift did not stabilize before timeout")
 
@@ -875,8 +895,17 @@ def pick_and_lift_ball(sim, robot, block, ball, initial_ball_pos, lift_height, e
     # 远离球的下降段也使用统一移动速度，最后约 4.5 cm 才减速进入球两侧。
     above_ball = ball_center(ball).clone()
     above_ball[:, 2] += 0.045
-    move_grasp_point(sim, robot, block, ball, above_ball, GRIPPER_OPEN_POSITION,
-                     speed=ARM_CARTESIAN_SPEED, smooth=True, target_rotation_w=approach_rotation_w)
+    move_grasp_point(
+        sim,
+        robot,
+        block,
+        ball,
+        above_ball,
+        GRIPPER_OPEN_POSITION,
+        speed=ARM_CARTESIAN_SPEED,
+        smooth=True,
+        target_rotation_w=approach_rotation_w,
+    )
     grasp_target = ball_center(ball).clone()
     grasp_error, _ = move_grasp_point(
         sim,
@@ -985,7 +1014,7 @@ def put_ball_back(sim, robot, block, ball, original_center, episode, *, on_block
         q = block.data.root_quat_w.torch[0]
         up_z = 1.0 - 2.0 * (q[1] ** 2 + q[2] ** 2).item()
         displacement = torch.linalg.vector_norm(block.data.root_pos_w.torch - initial_block_pos).item()
-        if up_z < 0.9998 or displacement > 0.003:
+        if up_z < 0.9998 or displacement > BLOCK_PLACEMENT_MAX_DISPLACEMENT:
             raise RuntimeError(f"FAILURE BLOCK_SUPPORT: tilt_or_motion up_z={up_z}, displacement={displacement}")
         return block.data.root_pos_w.torch[0, 2].item() + BLOCK_SIZE[2] / 2
 
@@ -1182,9 +1211,11 @@ def main() -> None:
         else (
             "PICK_LIFT_PUT_BACK"
             if args_cli.put_back
-            else "PICK_LIFT_ON_BLOCK"
-            if args_cli.place_on_block
-            else "PICK_LIFT" if args_cli.pick_lift else "RESET_ONLY (arm fixed)"
+            else (
+                "PICK_LIFT_ON_BLOCK"
+                if args_cli.place_on_block
+                else "PICK_LIFT" if args_cli.pick_lift else "RESET_ONLY (arm fixed)"
+            )
         )
     )
     print(f"RUN_MODE={mode}", flush=True)
@@ -1205,9 +1236,7 @@ def main() -> None:
         print(f"EPISODE_START index={episode} total={args_cli.episodes}", flush=True)
         block_pos, ball_pos = sample_object_positions(rng)
         print(f"EPISODE_RANDOM_TARGETS episode={episode} block={block_pos} ball={ball_pos}", flush=True)
-        ball_reset_center = reset_episode(
-            robot, block, ball, block_pos, ball_pos, ball_template=settled_ball_template
-        )
+        ball_reset_center = reset_episode(robot, block, ball, block_pos, ball_pos, ball_template=settled_ball_template)
         settle_steps = wait_until_scene_settled(
             sim,
             robot,
@@ -1219,9 +1248,7 @@ def main() -> None:
             ball_reset_center=ball_reset_center,
             required_steps=GRASP_READY_REQUIRED_STEPS if args_cli.pick_lift else SCENE_SETTLE_REQUIRED_STEPS,
             ball_root_threshold=GRASP_READY_ROOT_SPEED if args_cli.pick_lift else BALL_SETTLE_ROOT_SPEED,
-            ball_nodal_threshold=(
-                GRASP_READY_MAX_NODAL_SPEED if args_cli.pick_lift else BALL_SETTLE_MAX_NODAL_SPEED
-            ),
+            ball_nodal_threshold=(GRASP_READY_MAX_NODAL_SPEED if args_cli.pick_lift else BALL_SETTLE_MAX_NODAL_SPEED),
             ball_window_drift=GRASP_READY_WINDOW_DRIFT if args_cli.pick_lift else BALL_SETTLE_WINDOW_DRIFT,
         )
         if settled_ball_template is None:
