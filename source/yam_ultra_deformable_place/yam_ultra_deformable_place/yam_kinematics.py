@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import torch
 
-
 # 每个关节坐标系相对于前一 link 坐标系的固定平移 <origin xyz="...">。
 JOINT_ORIGINS_XYZ = (
     (0.0, 0.0, 0.0733),
@@ -83,7 +82,7 @@ def _axis_angle_matrix(axis: torch.Tensor, angle: torch.Tensor) -> torch.Tensor:
     x, y, z = axis
     zero = torch.zeros_like(x)
     # [axis]× 是满足 [axis]× v = axis × v 的反对称矩阵。
-    skew = torch.stack((zero, -z, y, z, zero, -x, -y, x, zero)).reshape(3, 3)
+    skew = torch.stack((zero, -z, y, z, zero, -x, -y, x, zero)).reshape(3, 3)  # ？作用
     eye = torch.eye(3, device=angle.device, dtype=angle.dtype)
     outer = axis[:, None] * axis[None, :]
     c = torch.cos(angle)[..., None, None]
@@ -100,7 +99,7 @@ def _quat_xyzw_matrix(quat: torch.Tensor) -> torch.Tensor:
     x, y, z, w = quat.unbind(-1)
     return torch.stack(
         (
-            1.0 - 2.0 * (y * y + z * z),
+            1.0 - 2.0 * (y * y + z * z),  # ？作用，为什么这么写
             2.0 * (x * y - z * w),
             2.0 * (x * z + y * w),
             2.0 * (x * y + z * w),
@@ -201,8 +200,7 @@ def damped_least_squares_position_step(
     jacobian_t = position_jacobian_w.transpose(1, 2)
     regularizer = (damping**2) * torch.eye(3, device=current_pos_w.device, dtype=current_pos_w.dtype)
     return (
-        jacobian_t
-        @ torch.linalg.solve(position_jacobian_w @ jacobian_t + regularizer, error.unsqueeze(-1))
+        jacobian_t @ torch.linalg.solve(position_jacobian_w @ jacobian_t + regularizer, error.unsqueeze(-1))
     ).squeeze(-1)
 
 
@@ -237,6 +235,5 @@ def damped_least_squares_pose_step(
     jacobian_t = geometric_jacobian_w.transpose(1, 2)
     regularizer = (damping**2) * torch.eye(6, device=current_pos_w.device, dtype=current_pos_w.dtype)
     return (
-        jacobian_t
-        @ torch.linalg.solve(geometric_jacobian_w @ jacobian_t + regularizer, pose_error.unsqueeze(-1))
+        jacobian_t @ torch.linalg.solve(geometric_jacobian_w @ jacobian_t + regularizer, pose_error.unsqueeze(-1))
     ).squeeze(-1)
