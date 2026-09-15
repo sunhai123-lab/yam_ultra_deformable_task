@@ -1,6 +1,8 @@
 # Reproducible environment
 
-Validated on 2026-09-11:
+## Environment baseline
+
+The project environment baseline was validated with:
 
 - Isaac Lab source tag: `v3.0.0-beta2.patch1`
 - Isaac Sim: `6.0.1.0`
@@ -10,31 +12,53 @@ Validated on 2026-09-11:
 - Warp: `1.13.0`
 - I2RT YAM Ultra 2 asset commit: `5b72c47239bd056d0fa6c1a39edeb0537c89443c`
 
-Environment path:
+Environment path used by the repository launch configurations:
 
-`/home/lightwheel-laure/embodied_ai_learning/isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/env_isaaclab`
+```text
+/home/lightwheel-laure/embodied_ai_learning/isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/env_isaaclab
+```
 
-Validated checks:
+## Current task architecture
 
-- Isaac Sim/Kit launch and five simulation steps.
-- Newton MJWarp CUDA solver initialization and one physics step.
-- Newton VBD tetrahedral deformable initialization, nodal reset, CUDA graph capture, and physics stepping.
-- YAM Ultra 2 URDF conversion to USD with a fixed base and collisions generated from visual meshes.
-- YAM Ultra 2 eight-joint articulation loading and 20 position-control steps with Newton MJWarp.
+The repository now has one task runtime entry point:
 
-Known limitations:
+```text
+scripts/yam_pick_ball.py
+```
 
-- The vendor URDF has no authored collision geometries; current collisions are generated from visual meshes and require visual/performance validation.
-- Vendor URDF effort and velocity limits are placeholders; runtime limits in the smoke test are provisional.
-- Arm/gripper gains require task-specific tuning before deformable grasp testing.
+The project-local kinematics implementation remains in:
 
+```text
+source/yam_ultra_deformable_place/yam_ultra_deformable_place/yam_kinematics.py
+```
 
-## 2026-09-11 task integration milestone
+`scripts/convert_yam_ultra_2.py` is only an asset conversion utility and is not a task-runner variant.
 
-- Added a two-way coupled Newton scene using `CoupledMJWarpVBDSolverCfg`, MJWarp, and VBD.
-- Added deterministic block and deformable-ball sampling plus complete rigid, nodal, and robot reset.
-- Added project-local YAM URDF-derived PyTorch FK, geometric Jacobian, and DLS position IK.
-- Verified three randomized reset episodes with 60 physics steps each.
-- Verified one randomized pre-grasp run at 5.6 mm gripper error and zero printed FK to simulation alignment error.
-- Confirmed a beta limitation: the built-in articulation Jacobian under the coupled MJWarp and VBD manager causes a native early exit, while the same Jacobian works under standalone MJWarp.
-- Open issue: a second reset after controlled robot motion can trigger a native early exit. Multi-episode control evaluation remains pending safe coupled-state reset handling.
+The current task uses:
+
+- Newton `CoupledMJWarpVBDSolverCfg` with MJWarp rigid/articulation dynamics and VBD deformable dynamics;
+- `two_way` rigid/deformable coupling;
+- project-local URDF-derived PyTorch FK and geometric Jacobian;
+- DLS position/pose IK instead of the simulator articulation Jacobian in the coupled VBD path;
+- runtime fingertip `convexDecomposition` collision approximation without modifying the vendored robot asset on disk;
+- table-centered robot placement and annular randomized object sampling;
+- radial gripper orientation, joint1-compatible IK seeding, and continuous polar transfer for opposite-side object configurations;
+- staged grasp, lift, placement, release, and settling acceptance checks.
+
+## Known implementation constraints
+
+- The vendored YAM URDF does not provide authored collision meshes for all links; runtime USD collision generation and fingertip convex decomposition are part of the current simulation setup.
+- Robot actuator gains, deformable material parameters, rigid/deformable contact parameters, and acceptance thresholds are task simulation parameters, not calibrated real-world measurements.
+- The built-in articulation Jacobian was avoided in the coupled MJWarp/VBD beta path because earlier testing showed native instability; the project therefore keeps its own URDF-derived FK/Jacobian implementation.
+- Object positions are obtained from simulation ground truth; perception noise and camera-based pose estimation are outside the current task.
+- The controller is a scripted state machine with local DLS IK, not a general collision-aware motion planner.
+- Passing the configured randomized episodes does not imply full-workspace or arbitrary-object grasp robustness.
+
+## Documentation
+
+Use only:
+
+- `docs/yam_pick_ball_reference.md` for parameters, functions, variables, and math;
+- `docs/yam_pick_ball_workflow.md` for run modes, state machine, validation, and debugging.
+
+The source code is the final authority for current numeric parameter values.
