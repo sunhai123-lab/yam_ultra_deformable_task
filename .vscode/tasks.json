@@ -5,183 +5,62 @@
       "label": "Task: Place ball on block GUI",
       "type": "process",
       "command": "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/isaaclab.sh",
-      "args": ["-p", "${workspaceFolder}/scripts/yam_pick_ball.py",
+      "args": [
+        "-p", "${workspaceFolder}/scripts/yam_pick_ball.py",
         "--visualizer", "kit", "--keep-open", "--pick-lift", "--place-on-block",
-        "--episodes", "3", "--steps-per-episode", "60", "--lift-height", "0.03", "--seed", "7"],
-      "options": {"cwd": "${workspaceFolder}", "env": {
-        "OMNI_KIT_ACCEPT_EULA": "yes", "ACCEPT_EULA": "Y", "PYTHONUNBUFFERED": "1"}},
+        "--episodes", "3", "--steps-per-episode", "60", "--lift-height", "0.03", "--seed", "7"
+      ],
+      "options": {"cwd": "${workspaceFolder}", "env": {"OMNI_KIT_ACCEPT_EULA": "yes", "ACCEPT_EULA": "Y", "PYTHONUNBUFFERED": "1"}},
       "problemMatcher": [],
       "presentation": {"reveal": "always", "panel": "dedicated", "clear": true},
       "group": {"kind": "build", "isDefault": true}
     },
     {
-      "label": "Smoke: Integrated Reset (headless)",
+      "label": "Task: Reset and settle (headless)",
       "type": "process",
       "command": "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/isaaclab.sh",
       "args": [
-        "-p",
-        "${workspaceFolder}/scripts/smoke_test_integrated_task.py",
-        "--visualizer",
-        "none",
-        "--episodes",
-        "3",
-        "--steps-per-episode",
-        "60",
-        "--seed",
-        "7"
+        "-p", "${workspaceFolder}/scripts/yam_pick_ball.py",
+        "--visualizer", "none", "--episodes", "3", "--steps-per-episode", "60", "--seed", "7"
       ],
-      "options": {
-        "cwd": "${workspaceFolder}",
-        "env": {
-          "OMNI_KIT_ACCEPT_EULA": "yes",
-          "ACCEPT_EULA": "Y",
-          "PYTHONUNBUFFERED": "1"
-        }
-      },
+      "options": {"cwd": "${workspaceFolder}", "env": {"OMNI_KIT_ACCEPT_EULA": "yes", "ACCEPT_EULA": "Y", "PYTHONUNBUFFERED": "1"}},
       "problemMatcher": [],
-      "presentation": {
-        "reveal": "always",
-        "panel": "dedicated",
-        "clear": true
-      }
+      "presentation": {"reveal": "always", "panel": "dedicated", "clear": true}
     },
     {
-      "label": "Task: Physical pick and lift 0.03 m (headless)",
+      "label": "Task: Pick and lift (headless)",
       "type": "process",
       "command": "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/isaaclab.sh",
       "args": [
-        "-p",
-        "${workspaceFolder}/scripts/smoke_test_integrated_task.py",
-        "--visualizer",
-        "none",
-        "--episodes",
-        "1",
-        "--steps-per-episode",
-        "60",
-        "--pick-lift",
-        "--motion-steps",
-        "240",
-        "--lift-height",
-        "0.03",
-        "--seed",
-        "7"
+        "-p", "${workspaceFolder}/scripts/yam_pick_ball.py",
+        "--visualizer", "none", "--pick-lift", "--episodes", "1", "--steps-per-episode", "60",
+        "--lift-height", "0.03", "--seed", "7"
       ],
-      "options": {
-        "cwd": "${workspaceFolder}",
-        "env": {
-          "OMNI_KIT_ACCEPT_EULA": "yes",
-          "ACCEPT_EULA": "Y",
-          "PYTHONUNBUFFERED": "1"
-        }
-      },
+      "options": {"cwd": "${workspaceFolder}", "env": {"OMNI_KIT_ACCEPT_EULA": "yes", "ACCEPT_EULA": "Y", "PYTHONUNBUFFERED": "1"}},
       "problemMatcher": [],
-      "presentation": {
-        "reveal": "always",
-        "panel": "dedicated",
-        "clear": true
-      }
+      "presentation": {"reveal": "always", "panel": "dedicated", "clear": true}
     },
     {
-      "label": "Task: Physical grasp and put back GUI (0.03 m)",
+      "label": "Diagnostic: Gripper open-close GUI",
       "type": "process",
       "command": "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/isaaclab.sh",
       "args": [
-        "-p",
-        "${workspaceFolder}/scripts/smoke_test_integrated_task.py",
-        "--visualizer",
-        "kit",
-        "--keep-open",
-        "--pick-lift",
-        "--put-back",
-        "--episodes",
-        "1",
-        "--steps-per-episode",
-        "60",
-        "--motion-steps",
-        "240",
-        "--lift-height",
-        "0.03",
-        "--seed",
-        "7"
+        "-p", "${workspaceFolder}/scripts/yam_pick_ball.py",
+        "--visualizer", "kit", "--keep-open", "--gripper-check",
+        "--episodes", "1", "--steps-per-episode", "60", "--seed", "7"
       ],
-      "options": {
-        "cwd": "${workspaceFolder}",
-        "env": {
-          "OMNI_KIT_ACCEPT_EULA": "yes",
-          "ACCEPT_EULA": "Y",
-          "PYTHONUNBUFFERED": "1"
-        }
-      },
+      "options": {"cwd": "${workspaceFolder}", "env": {"OMNI_KIT_ACCEPT_EULA": "yes", "ACCEPT_EULA": "Y", "PYTHONUNBUFFERED": "1"}},
       "problemMatcher": [],
-      "presentation": {
-        "reveal": "always",
-        "panel": "dedicated",
-        "clear": true
-      },
-      "group": {
-        "kind": "build",
-        "isDefault": false
-      }
-    },
-    {
-      "label": "Diagnostic: Original gripper open-close GUI",
-      "type": "process",
-      "command": "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/isaaclab.sh",
-      "args": [
-        "-p",
-        "${workspaceFolder}/scripts/smoke_test_integrated_task.py",
-        "--visualizer",
-        "kit",
-        "--keep-open",
-        "--gripper-check",
-        "--episodes",
-        "1",
-        "--steps-per-episode",
-        "60",
-        "--motion-steps",
-        "240",
-        "--lift-height",
-        "0.03",
-        "--seed",
-        "7"
-      ],
-      "options": {
-        "cwd": "${workspaceFolder}",
-        "env": {
-          "OMNI_KIT_ACCEPT_EULA": "yes",
-          "ACCEPT_EULA": "Y",
-          "PYTHONUNBUFFERED": "1"
-        }
-      },
-      "problemMatcher": [],
-      "presentation": {
-        "reveal": "always",
-        "panel": "dedicated",
-        "clear": true
-      }
+      "presentation": {"reveal": "always", "panel": "dedicated", "clear": true}
     },
     {
       "label": "Assets: Convert YAM URDF to USD",
       "type": "process",
       "command": "${workspaceFolder}/../isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/isaaclab.sh",
-      "args": [
-        "-p",
-        "${workspaceFolder}/scripts/convert_yam_ultra_2.py"
-      ],
-      "options": {
-        "cwd": "${workspaceFolder}",
-        "env": {
-          "OMNI_KIT_ACCEPT_EULA": "yes",
-          "ACCEPT_EULA": "Y",
-          "PYTHONUNBUFFERED": "1"
-        }
-      },
+      "args": ["-p", "${workspaceFolder}/scripts/convert_yam_ultra_2.py"],
+      "options": {"cwd": "${workspaceFolder}", "env": {"OMNI_KIT_ACCEPT_EULA": "yes", "ACCEPT_EULA": "Y", "PYTHONUNBUFFERED": "1"}},
       "problemMatcher": [],
-      "presentation": {
-        "reveal": "always",
-        "panel": "dedicated",
-        "clear": true
-      }
+      "presentation": {"reveal": "always", "panel": "dedicated", "clear": true}
     }
   ]
 }
