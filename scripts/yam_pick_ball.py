@@ -36,6 +36,7 @@ from __future__ import annotations
 
 # argparse：解析命令行参数，例如 --episodes 1 --pick-lift。
 import argparse
+import builtins
 
 # math：环形随机采样时把半径/方位角转换成世界 XY 坐标。
 import math
@@ -48,6 +49,17 @@ import time
 
 # Path：用相对当前脚本的路径找到项目根目录和机器人 USD。
 from pathlib import Path
+
+# 多轮 episode 验证时只保留最关键日志；这里只过滤本文件自己的 print，
+# 不改变任何物理、IK、判定或异常逻辑，也不会屏蔽 Python traceback / Isaac Lab 自身日志。
+_ORIGINAL_PRINT = builtins.print
+_ALLOWED_LOG_PREFIXES = ("RUN_CONFIG", "EPISODE_START", "RUN_SUCCESS", "GRASP_FAILURE")
+
+
+def print(*args, **kwargs):
+    if args and str(args[0]).startswith(_ALLOWED_LOG_PREFIXES):
+        _ORIGINAL_PRINT(*args, **kwargs)
+
 
 # ------------------------------------------------------------
 # AppLauncher 必须尽量早启动。
@@ -1650,7 +1662,7 @@ def main() -> None:
             )
         )
     )
-    print(f"RUN_MODE={mode} seed={args_cli.seed} episodes={args_cli.episodes}", flush=True)
+    print(f"RUN_CONFIG mode={mode} episodes={args_cli.episodes} seed={args_cli.seed}", flush=True)
     print(f"WORKSPACE base={ROBOT_BASE_XY} radius={OBJECT_RADIUS_RANGE} bearing={OBJECT_BEARING_RANGE}", flush=True)
     sim = make_sim()
     # eye=观察相机世界位置；target=镜头朝向点。
@@ -1665,9 +1677,11 @@ def main() -> None:
     settled_ball_template = None
 
     for episode in range(args_cli.episodes):
-        print(f"EPISODE_START index={episode} total={args_cli.episodes}", flush=True)
         block_pos, ball_pos = sample_object_positions(rng)
-        print(f"EPISODE_RANDOM_TARGETS episode={episode} block={block_pos} ball={ball_pos}", flush=True)
+        print(
+            f"EPISODE_START episode={episode + 1}/{args_cli.episodes} block={block_pos} ball={ball_pos}",
+            flush=True,
+        )
         ball_reset_center = reset_episode(robot, block, ball, block_pos, ball_pos, ball_template=settled_ball_template)
         settle_steps = wait_until_scene_settled(
             sim,
@@ -1767,7 +1781,7 @@ def main() -> None:
         f"placement_ok={len(placement_results)} timings={motion_timings}",
         flush=True,
     )
-    print("YAM_DEFORMABLE_TASK_INTEGRATION_OK")
+    print(f"RUN_SUCCESS episodes={args_cli.episodes}", flush=True)
 
     if args_cli.keep_open:
         if args_cli.headless:
