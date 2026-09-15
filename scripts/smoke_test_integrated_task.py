@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import random
 import time
 from pathlib import Path
@@ -85,15 +86,15 @@ YAM_USD = PROJECT_ROOT / "assets/generated/yam_ultra_2/yam_ultra/yam_ultra.usda"
 TABLE_SIZE = (1.10, 0.75, 0.08)
 TABLE_CENTER = (0.12, 0.0, 0.40)
 TABLE_TOP_Z = TABLE_CENTER[2] + TABLE_SIZE[2] / 2.0
-# 随机区域采用世界坐标。机器人基座位于 (-0.22, 0.0)，两个 Y 区间分居基座前方两侧。
-BLOCK_X_RANGE = (-0.02, 0.28)
-BLOCK_Y_RANGE = (0.06, 0.26)
-BALL_X_RANGE = (-0.02, 0.28)
-BALL_Y_RANGE = (-0.26, -0.06)
-SAMPLE_REACH_RADIUS = (0.20, 0.40)
+# 机器人固定在桌面中心；物体在基座周围的环形工作区内独立采样。
+ROBOT_BASE_XY = TABLE_CENTER[:2]
+OBJECT_RADIUS_RANGE = (0.20, 0.30)
+# YAM joint1 约有 330 度行程。该方位区间保留限位余量，同时仍覆盖桌面四个方向。
+OBJECT_BEARING_RANGE = (-2.05, 3.54)
 MIN_OBJECT_PLANAR_DISTANCE = 0.18
 SAMPLING_MAX_ATTEMPTS = 100
-ROBOT_BASE_XY = (-0.22, 0.0)
+MAX_TRANSFER_BEARING_STEP = 0.70  # 搬运绕基座时每段最多转约 40 度。
+TRANSFER_BALL_ALIGNMENT_TOLERANCE = 0.002  # 下放前把实际球心对正到目标 2 mm 内。
 BLOCK_SIZE = (0.07, 0.07, 0.05)
 BLOCK_RESET_CLEARANCE = 5.0e-4
 RIGID_STATIC_FRICTION = 0.6
@@ -237,7 +238,7 @@ def spawn_scene() -> tuple[Articulation, RigidObject, DeformableObject]:
             joint_drive_props=sim_utils.JointDrivePropertiesCfg(max_force=80.0, max_joint_velocity=3.0),
         ),
         init_state=ArticulationCfg.InitialStateCfg(
-            pos=(-0.22, 0.0, TABLE_TOP_Z),
+            pos=(*ROBOT_BASE_XY, TABLE_TOP_Z),
             joint_pos={
                 "joint1": 0.0,
                 "joint2": 1.0,
@@ -317,28 +318,27 @@ def spawn_scene() -> tuple[Articulation, RigidObject, DeformableObject]:
 
 
 def sample_object_positions(rng: random.Random) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
-    """在扩大的桌面区域内采样，并剔除过近或超出机械臂水平工作半径的组合。"""
+    """在桌心机器人周围采样球和方块，并避免靠近基座或彼此重叠。"""
 
-    def reachable(point_xy):
-        radius = ((point_xy[0] - ROBOT_BASE_XY[0]) ** 2 + (point_xy[1] - ROBOT_BASE_XY[1]) ** 2) ** 0.5
-        return SAMPLE_REACH_RADIUS[0] <= radius <= SAMPLE_REACH_RADIUS[1]
+    def sample_on_annulus(z: float) -> tuple[float, float, float]:
+        radius = rng.uniform(*OBJECT_RADIUS_RANGE)
+        bearing = rng.uniform(*OBJECT_BEARING_RANGE)
+        return (
+            ROBOT_BASE_XY[0] + radius * math.cos(bearing),
+            ROBOT_BASE_XY[1] + radius * math.sin(bearing),
+            z,
+        )
 
     for _ in range(SAMPLING_MAX_ATTEMPTS):
-        block_pos = (
-            rng.uniform(*BLOCK_X_RANGE),
-            rng.uniform(*BLOCK_Y_RANGE),
-            TABLE_TOP_Z + BLOCK_SIZE[2] / 2.0 + BLOCK_RESET_CLEARANCE,
+        block_pos = sample_on_annulus(
+            TABLE_TOP_Z + BLOCK_SIZE[2] / 2.0 + BLOCK_RESET_CLEARANCE
         )
-        ball_pos = (
-            rng.uniform(*BALL_X_RANGE),
-            rng.uniform(*BALL_Y_RANGE),
-            TABLE_TOP_Z + BALL_RADIUS,
-        )
+        ball_pos = sample_on_annulus(TABLE_TOP_Z + BALL_RADIUS)
         planar_distance = ((block_pos[0] - ball_pos[0]) ** 2 + (block_pos[1] - ball_pos[1]) ** 2) ** 0.5
-        if planar_distance >= MIN_OBJECT_PLANAR_DISTANCE and reachable(block_pos[:2]) and reachable(ball_pos[:2]):
+        if planar_distance >= MIN_OBJECT_PLANAR_DISTANCE:
             return block_pos, ball_pos
     raise RuntimeError(
-        "Could not sample reachable object positions; check random ranges, reach radius, and minimum distance"
+        "Could not sample separated object positions; check radius, bearing range, and minimum distance"
     )
 
 
@@ -698,9 +698,43 @@ def move_grasp_point(
     return torch.linalg.vector_norm(final_grasp_pos_w - target_pos_w, dim=-1).item(), initial_fk_error
 
 
+def radial_grasp_rotation(robot, target_pos_w):
+    """生成随目标方位旋转、但 Z 轴始终竖直的夹爪姿态。
+
+    原任务所有物体都在机器人同一侧，所以固定世界姿态即可。机器人移到桌心后，
+    joint1 需要朝向目标方位，夹爪也应同步绕世界 Z 轴旋转，避免腕部用有限行程
+    抵消整圈方位变化。
+    """
+    root_xy = robot.data.root_link_pose_w.torch[:, :2]
+    bearing = torch.atan2(target_pos_w[:, 1] - root_xy[:, 1], target_pos_w[:, 0] - root_xy[:, 0])
+    cosine, sine = torch.cos(bearing), torch.sin(bearing)
+    zero, one = torch.zeros_like(cosine), torch.ones_like(cosine)
+    yaw_rotation = torch.stack(
+        (cosine, -sine, zero, sine, cosine, zero, zero, zero, one), dim=-1
+    ).reshape(-1, 3, 3)
+    reference = torch.tensor(GRASP_ROTATION_W, device=robot.device, dtype=target_pos_w.dtype).unsqueeze(0)
+    return yaw_rotation @ reference
+
+
+def joint1_compatible_bearing(robot, target_pos_w):
+    """把 atan2 方位展开到与 joint1 当前限位兼容的等价角。"""
+    root_xy = robot.data.root_link_pose_w.torch[:, :2]
+    bearing = torch.atan2(target_pos_w[:, 1] - root_xy[:, 1], target_pos_w[:, 0] - root_xy[:, 0])
+    limits = robot.data.joint_pos_limits.torch[0, 0]
+    seeded_joint1 = APPROACH_IK_SEED[0] + bearing
+    two_pi = 2.0 * torch.pi
+    bearing = torch.where(seeded_joint1 < limits[0], bearing + two_pi, bearing)
+    seeded_joint1 = APPROACH_IK_SEED[0] + bearing
+    bearing = torch.where(seeded_joint1 > limits[1], bearing - two_pi, bearing)
+    return bearing
+
+
 def solve_approach_joint_target(robot, target_pos_w, target_rotation_w, iterations=300):
     arm_target = torch.tensor((APPROACH_IK_SEED,), device=robot.device, dtype=robot.data.joint_pos.torch.dtype)
     limits = robot.data.joint_pos_limits.torch[0, :6]
+    # 原 IK 初值只适用于机器人 +X 一侧；按目标方位旋转 joint1 初值，保留同一肘形。
+    arm_target[:, 0] += joint1_compatible_bearing(robot, target_pos_w)
+    arm_target = torch.clamp(arm_target, min=limits[:, 0], max=limits[:, 1])
     root_pose_w = robot.data.root_link_pose_w.torch
     for _ in range(iterations):
         _, current_rotation_w, _ = forward_kinematics_and_jacobian(root_pose_w, arm_target)
@@ -825,7 +859,7 @@ def pick_and_lift_ball(sim, robot, block, ball, initial_ball_pos, lift_height, e
     initial_ball_target = torch.tensor((initial_ball_pos,), device=device, dtype=dtype)
     pregrasp_offset = torch.tensor(((0.0, 0.0, 0.10),), device=device, dtype=dtype)
     pregrasp_target = initial_ball_target + pregrasp_offset
-    approach_rotation_w = torch.tensor(GRASP_ROTATION_W, device=device, dtype=dtype).unsqueeze(0)
+    approach_rotation_w = radial_grasp_rotation(robot, pregrasp_target)
     pregrasp_joint_target, solved_position_error, solved_rotation_error = solve_approach_joint_target(
         robot, pregrasp_target, approach_rotation_w
     )
@@ -1006,6 +1040,7 @@ def put_ball_back(sim, robot, block, ball, original_center, episode, *, on_block
     if on_block:
         origin[:, :2] = initial_block_pos[:, :2]
         origin[:, 2] = initial_block_pos[:, 2] + BLOCK_SIZE[2] / 2 + BALL_RADIUS
+    destination_rotation_w = radial_grasp_rotation(robot, origin)
 
     def support_height():
         if not on_block:
@@ -1027,6 +1062,9 @@ def put_ball_back(sim, robot, block, ball, original_center, episode, *, on_block
     if on_block and clearance() < 0.05:
         print("STATE=RAISE_FOR_TRANSFER", flush=True)
         target = grasp_position()
+        current_rotation_w = grasp_point_kinematics(
+            robot.data.root_link_pose_w.torch, robot.data.joint_pos.torch[:, :6]
+        )[1].clone()
         # 先垂直抬高，让球底高于方块顶面 6 cm 后才开始横向搬运。
         target[:, 2] += max(0.0, 0.06 - clearance())
         error, _ = move_grasp_point(
@@ -1036,6 +1074,7 @@ def put_ball_back(sim, robot, block, ball, original_center, episode, *, on_block
             ball,
             target,
             GRIPPER_GRASP_POSITION,
+            target_rotation_w=current_rotation_w,
             speed=LIFT_SPEED,
             smooth=True,
             on_step=lambda: check_ball_in_gripper(robot, ball),
@@ -1044,19 +1083,37 @@ def put_ball_back(sim, robot, block, ball, original_center, episode, *, on_block
             raise RuntimeError(f"FAILURE TRANSFER_HEIGHT: error={error}, clearance={clearance()}")
 
     print("STATE=TRANSFER_TO_BLOCK" if on_block else "STATE=RETURN_ALIGN", flush=True)
-    target = grasp_position()
-    target[:, :2] += origin[:, :2] - ball_center(ball)[:, :2]
-    alignment_error, _ = move_grasp_point(
-        sim,
-        robot,
-        block,
-        ball,
-        target,
-        GRIPPER_GRASP_POSITION,
-        speed=TRANSFER_SPEED,
-        smooth=True,
-        on_step=lambda: check_ball_in_gripper(robot, ball),
-    )
+    # 桌心布局下，球和方块可能分处机器人两侧。沿环形工作区分段搬运，避免直线
+    # 插值让球穿过基座；方位使用 joint1 的可行展开角，防止跨越关节限位缺口。
+    start_center = ball_center(ball).clone()
+    start_bearing = joint1_compatible_bearing(robot, start_center)
+    destination_bearing = joint1_compatible_bearing(robot, origin)
+    bearing_delta = destination_bearing - start_bearing
+    transfer_segments = max(1, math.ceil(abs(bearing_delta.item()) / MAX_TRANSFER_BEARING_STEP))
+    root_xy = robot.data.root_link_pose_w.torch[:, :2]
+    start_radius = torch.linalg.vector_norm(start_center[:, :2] - root_xy, dim=-1)
+    destination_radius = torch.linalg.vector_norm(origin[:, :2] - root_xy, dim=-1)
+    alignment_error = float("inf")
+    for segment in range(1, transfer_segments + 1):
+        fraction = segment / transfer_segments
+        bearing = start_bearing + fraction * bearing_delta
+        radius = start_radius + fraction * (destination_radius - start_radius)
+        desired_ball_xy = root_xy + torch.stack((radius * torch.cos(bearing), radius * torch.sin(bearing)), dim=-1)
+        target = grasp_position()
+        target[:, :2] += desired_ball_xy - ball_center(ball)[:, :2]
+        waypoint = torch.cat((desired_ball_xy, origin[:, 2:]), dim=-1)
+        alignment_error, _ = move_grasp_point(
+            sim,
+            robot,
+            block,
+            ball,
+            target,
+            GRIPPER_GRASP_POSITION,
+            target_rotation_w=radial_grasp_rotation(robot, waypoint),
+            speed=TRANSFER_SPEED,
+            smooth=True,
+            on_step=lambda: check_ball_in_gripper(robot, ball),
+        )
     if alignment_error > 0.005:
         # 边缘随机位置可能在高速横移后残留跟踪误差；保持同一速度，用短程闭环继续收敛。
         print(f"STATE=TRANSFER_CORRECTION initial_error_m={alignment_error:.6f}", flush=True)
@@ -1067,12 +1124,42 @@ def put_ball_back(sim, robot, block, ball, original_center, episode, *, on_block
             ball,
             target,
             GRIPPER_GRASP_POSITION,
+            target_rotation_w=destination_rotation_w,
             speed=TRANSFER_SPEED,
             smooth=True,
             on_step=lambda: check_ball_in_gripper(robot, ball),
         )
     if alignment_error > 0.005:
         raise RuntimeError(f"FAILURE TRANSFER_IK: error={alignment_error}")
+
+    # 长弧搬运中软球可能在夹爪内产生毫米级弹性偏移。最终以实际球心闭环对正，
+    # 不能仅凭刚性夹爪的 IK 目标误差判断已经位于方块中心。
+    for correction in range(3):
+        ball_alignment_error = torch.linalg.vector_norm(ball_center(ball)[:, :2] - origin[:, :2]).item()
+        if ball_alignment_error <= TRANSFER_BALL_ALIGNMENT_TOLERANCE:
+            break
+        print(
+            f"STATE=BALL_ALIGNMENT_CORRECTION pass={correction + 1} error_m={ball_alignment_error:.6f}",
+            flush=True,
+        )
+        target = grasp_position()
+        target[:, :2] += origin[:, :2] - ball_center(ball)[:, :2]
+        move_grasp_point(
+            sim,
+            robot,
+            block,
+            ball,
+            target,
+            GRIPPER_GRASP_POSITION,
+            target_rotation_w=destination_rotation_w,
+            speed=TRANSFER_SPEED,
+            smooth=True,
+            on_step=lambda: check_ball_in_gripper(robot, ball),
+        )
+    else:
+        ball_alignment_error = torch.linalg.vector_norm(ball_center(ball)[:, :2] - origin[:, :2]).item()
+    if ball_alignment_error > TRANSFER_BALL_ALIGNMENT_TOLERANCE:
+        raise RuntimeError(f"FAILURE TRANSFER_BALL_ALIGNMENT: error={ball_alignment_error}")
 
     print("STATE=LOWER_TO_BLOCK" if on_block else "STATE=LOWER_TO_TABLE", flush=True)
     # 高速接近先停在 15 mm 净空处，再由低速末段接地。
@@ -1085,6 +1172,7 @@ def put_ball_back(sim, robot, block, ball, original_center, episode, *, on_block
         ball,
         target,
         GRIPPER_GRASP_POSITION,
+        target_rotation_w=destination_rotation_w,
         speed=PLACE_APPROACH_SPEED,
         smooth=True,
         on_step=lambda: check_ball_in_gripper(robot, ball),
@@ -1104,6 +1192,7 @@ def put_ball_back(sim, robot, block, ball, original_center, episode, *, on_block
             ball,
             target,
             GRIPPER_GRASP_POSITION,
+            target_rotation_w=destination_rotation_w,
             speed=PLACE_SPEED,
             smooth=True,
             on_step=lambda: check_ball_in_gripper(robot, ball),
@@ -1158,7 +1247,17 @@ def put_ball_back(sim, robot, block, ball, original_center, episode, *, on_block
     print("STATE=RETREAT", flush=True)
     target = grasp_position()
     target[:, 2] += 0.10
-    move_grasp_point(sim, robot, block, ball, target, GRIPPER_OPEN_POSITION, smooth=True, on_step=monitor_release)
+    move_grasp_point(
+        sim,
+        robot,
+        block,
+        ball,
+        target,
+        GRIPPER_OPEN_POSITION,
+        target_rotation_w=destination_rotation_w,
+        smooth=True,
+        on_step=monitor_release,
+    )
     final_steps = wait_until_scene_settled(
         sim,
         robot,

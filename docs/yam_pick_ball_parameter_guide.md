@@ -1,5 +1,7 @@
 # `yam_pick_ball.py` 100% 学习说明
 
+> 历史参数快照：其中固定 Y 区域、方位限制和运动控制描述已不适用于当前桌心版本。请优先阅读 [当前逐函数、数学、变量与语法手册](yam_pick_ball_function_math_guide.md)。
+
 > 基于 `fix/rigid-block-stability` 分支的 `scripts/yam_pick_ball.py`，读取时分支 HEAD 为 `05874a5`（`learn to change the range`）。本说明按“你改哪个参数，会影响什么”的角度整理。
 
 ## 1. 先看清整个程序在干什么
