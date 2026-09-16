@@ -51,7 +51,7 @@ scripts/yam_pick_ball.py
 TABLE_SIZE = (1.50, 1.50, 0.08)
 TABLE_CENTER = (0.0, 0.0, 0.0)
 ROBOT_BASE_XY = TABLE_CENTER[:2]
-OBJECT_RADIUS_RANGE = (0.30, 0.45)
+OBJECT_RADIUS_RANGE = (0.30, 0.43)
 OBJECT_BEARING_RANGE = (-2.40, 3.00)
 MIN_OBJECT_PLANAR_DISTANCE = 0.18
 MAX_TRANSFER_BEARING_DELTA = math.pi
@@ -135,6 +135,29 @@ OMNI_KIT_ACCEPT_EULA=yes ACCEPT_EULA=Y \
 `--motion-steps` 是整体运动时间倍率基准，不是每个阶段固定运行多少步。当前主程序要求 `>=240`；如果要主动调快/调慢某一阶段，优先修改源码中的具名速度常量。
 
 每个 episode 都会重新随机采样方块和球的位置，复位机器人、方块和软球，等待场景稳定后执行所选任务。可恢复的任务失败会输出 `EPISODE_FAILED`，随后自动进入下一轮。批量结束时会统计 `complete_ok`、`failed`、`settle_ok`、`pick_ok` 和 `placement_ok`。如果出现 NaN/Inf 或 CUDA illegal memory error，程序会停止，因为此时仿真状态已经不可信。
+
+### 最近一次稳健性验证
+
+最近一次自动日志使用当前环形随机工作区，连续运行了 200 个随机 episode：
+
+```text
+mode=PICK_LIFT_ON_BLOCK  episodes=200  seed=7
+radius=(0.30, 0.43)      bearing=(-2.40, 3.00)
+```
+
+| 检查项 | 结果 |
+|---|---:|
+| 场景沉降稳定 | 200/200 |
+| 物理抓取并抬升 | 199/200 |
+| 松爪沉降后小球仍留在方块上 | 199/200 |
+| 完成的 episode | 199/200 |
+| 总体完成率 | 99.5% |
+
+唯一失败的 episode 在 `pick_and_lift` 阶段触发了 `QUICK_GRASP_TIMEOUT`，稳定计数只达到 `1/12`。失败快照显示：小球仍在夹爪包络内，球心与夹爪中心偏差约 `0.84 mm`，没有过度变形，也没有关节限位饱和。因此，这次应归类为抓取稳定性检查超时，而不是已经确认的小球脱落。
+
+释放后的机械臂撤退阶段共出现 42 次 `RETREAT_INCOMPLETE` / `MOTION_TIMEOUT` 警告。这些都是可恢复警告，没有造成放置失败；其余完成的 episode 全部通过最终支撑检查。当前放置成功的判据是：松爪并等待沉降、观察后，小球仍由方块支撑，而不是要求球心必须精确对齐方块中心。
+
+这组结果说明：在当前软球材质、机器人固定姿态、环形工作区、控制器参数和随机种子下，方法表现出较好的稳健性。但单个种子的一次 200 轮运行还不能证明具有通用操作能力；后续应使用更多随机种子，并扩大工作区、材质和参数范围后再做统计结论。完整原始记录见[200 轮运行日志](logs/yam_pick_ball_20260916_135206.log)。
 
 ## VS Code
 

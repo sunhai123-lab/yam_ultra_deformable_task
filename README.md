@@ -51,7 +51,7 @@ The learning task uses a table-centered robot and annular object sampling:
 TABLE_SIZE = (1.50, 1.50, 0.08)
 TABLE_CENTER = (0.0, 0.0, 0.0)
 ROBOT_BASE_XY = TABLE_CENTER[:2]
-OBJECT_RADIUS_RANGE = (0.30, 0.45)
+OBJECT_RADIUS_RANGE = (0.30, 0.43)
 OBJECT_BEARING_RANGE = (-2.40, 3.00)
 MIN_OBJECT_PLANAR_DISTANCE = 0.18
 MAX_TRANSFER_BEARING_DELTA = math.pi
@@ -135,6 +135,29 @@ OMNI_KIT_ACCEPT_EULA=yes ACCEPT_EULA=Y \
 `--motion-steps` is a time-scale baseline, not a fixed per-stage step count. The current script requires values `>=240`; use the named speed constants in the source when intentionally tuning motion speed.
 
 Each episode samples new object positions, resets the robot, block, and deformable ball, waits for settling, and runs the selected task. A recoverable task failure is reported as `EPISODE_FAILED` and the next episode starts automatically. The batch summary reports `complete_ok`, `failed`, `settle_ok`, `pick_ok`, and `placement_ok`. Numerical corruption such as NaN/Inf or a CUDA illegal-memory error stops the process because the simulator state cannot be trusted afterward.
+
+### Latest robustness validation
+
+The latest logged batch used the current annular workspace and ran 200 randomized episodes:
+
+```text
+mode=PICK_LIFT_ON_BLOCK  episodes=200  seed=7
+radius=(0.30, 0.43)      bearing=(-2.40, 3.00)
+```
+
+| Check | Result |
+|---|---:|
+| Scene settling | 200/200 |
+| Physical pick and lift | 199/200 |
+| Ball remains on the block after release and settling | 199/200 |
+| Completed episodes | 199/200 |
+| Overall rate | 99.5% |
+
+The only failed episode stopped at `pick_and_lift` with `QUICK_GRASP_TIMEOUT`: the stability counter reached `1/12`. The failure snapshot still showed the ball enveloped by the fingers, a ball-to-gripper offset of about `0.84 mm`, no excessive deformation, and no joint-limit saturation. This is therefore classified as a grasp-stability-check timeout, not confirmed ball loss.
+
+There were 42 `RETREAT_INCOMPLETE` / `MOTION_TIMEOUT` warnings during post-release retreat. They were recoverable and did not cause a placement failure; the ball passed the final support check in every otherwise completed episode. The final placement criterion is that the ball remains supported by the block after release settling and observation, rather than requiring the ball center to exactly coincide with the block center.
+
+This result supports good robustness for the tested object material, robot pose, workspace annulus, controller parameters, and seed. It is not yet a statistical guarantee of general-purpose manipulation: more seeds, wider workspace/material ranges, and repeated runs should be used before making that claim. The full raw record is [the 200-episode log](logs/yam_pick_ball_20260916_135206.log).
 
 ## VS Code
 
