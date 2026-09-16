@@ -4,6 +4,8 @@
 
 本项目使用 Isaac Lab + Newton 构建 YAM Ultra 2 桌面操作场景。机器人通过原始夹指几何、碰撞、摩擦和软体变形真实抓取 VBD 可变形球，并可选择把球放回桌面或搬运到动态刚体方块上。
 
+当前已验证的软件环境为 Isaac Lab `v3.0.0-beta2.patch1`、Isaac Sim `6.0.1.0`、Python `3.12.14`、Newton `1.2.1` 和 Warp `1.13.0`。完整版本记录见 [`VERSIONS.md`](VERSIONS.md)。
+
 ## 当前仓库结构
 
 任务运行只保留一个主入口：
@@ -71,6 +73,8 @@ y = robot_y + r sin(theta)
 -m pip install -e source/yam_ultra_deformable_place
 ```
 
+下面的命令都应在工程根目录执行，并使用匹配版本 Isaac Lab 的 launcher 和 `env_isaaclab` Python 环境。
+
 ## 常用运行方式
 
 ### 只做 reset 和沉降检查
@@ -118,11 +122,29 @@ OMNI_KIT_ACCEPT_EULA=yes ACCEPT_EULA=Y \
 --pick-lift --place-on-block --episodes 3 --steps-per-episode 60 --lift-height 0.03 --seed 7
 ```
 
-`--motion-steps` 现在是整体运动时间倍率基准，不是每个阶段固定运行多少步。当前主程序要求 `>=240`；如果要主动调快/调慢某一阶段，优先修改源码中的具名速度常量。
+如果要进行大量 episode，可以增加 `--episodes`，例如：
+
+```bash
+OMNI_KIT_ACCEPT_EULA=yes ACCEPT_EULA=Y \
+/home/lightwheel-laure/embodied_ai_learning/isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/isaaclab.sh \
+-p scripts/yam_pick_ball.py --visualizer none \
+--pick-lift --place-on-block --episodes 50 --steps-per-episode 60 \
+--motion-steps 240 --lift-height 0.03 --seed 7
+```
+
+`--motion-steps` 是整体运动时间倍率基准，不是每个阶段固定运行多少步。当前主程序要求 `>=240`；如果要主动调快/调慢某一阶段，优先修改源码中的具名速度常量。
+
+每个 episode 都会重新随机采样方块和球的位置，复位机器人、方块和软球，等待场景稳定后执行所选任务。可恢复的任务失败会输出 `EPISODE_FAILED`，随后自动进入下一轮。批量结束时会统计 `complete_ok`、`failed`、`settle_ok`、`pick_ok` 和 `placement_ok`。如果出现 NaN/Inf 或 CUDA illegal memory error，程序会停止，因为此时仿真状态已经不可信。
 
 ## VS Code
 
-仓库中的 `.vscode/launch.json` 和 `.vscode/tasks.json` 已统一指向 `scripts/yam_pick_ball.py` 的不同 CLI 模式。默认 build task 为 GUI 放球到方块模式。资产转换单独保留一个工具任务。
+仓库中的 `.vscode/launch.json` 和 `.vscode/tasks.json` 已统一指向 `scripts/yam_pick_ball.py` 的不同 CLI 模式。
+
+- F5：`Task: Place ball on block GUI`，默认 3 轮，完成后通过 `--keep-open` 保持 GUI；
+- Ctrl+Shift+B：默认 build task，运行 50 轮 GUI 放球到方块；
+- 其他配置覆盖 reset/settle、抓取抬升、夹爪诊断和资产转换。
+
+GUI 批量运行中如果遇到可恢复失败，终端会记录失败并继续下一轮；最终汇总输出后手动关闭 GUI 窗口即可。
 
 ## 重新生成机器人 USD
 
@@ -139,17 +161,17 @@ OMNI_KIT_ACCEPT_EULA=yes ACCEPT_EULA=Y \
 常见终端标记：
 
 ```text
-GRIPPER_CHECK_OK
-QUICK_GRASP_OK
-YAM_DEFORMABLE_BALL_LIFT_OK
-YAM_DEFORMABLE_BALL_PUT_BACK_OK
-YAM_DEFORMABLE_BALL_ON_BLOCK_OK
+RUN_CONFIG
+EPISODE_START
 EPISODE_COMPLETE
+EPISODE_FAILED
 EPISODE_SUMMARY
-YAM_DEFORMABLE_TASK_INTEGRATION_OK
+RUN_SUCCESS
+RUN_COMPLETE
+GRASP_FAILURE
 ```
 
-这些标记表示当前请求模式通过了配置好的几何、速度、支撑、沉降和抬升/放置判据，不代表机器人已经具备任意物体、任意姿态、完整工作空间上的通用抓取能力。
+`EPISODE_COMPLETE` 表示该轮通过了配置好的检查；`RUN_SUCCESS` 表示所有请求的 episode 都完成；`RUN_COMPLETE` 表示批量运行结束，但其中有可恢复失败，需要结合 `EPISODE_FAILED` 和汇总计数查看；`GRASP_FAILURE` 表示顶层致命异常。通过这些脚本化检查不代表机器人已经具备任意物体、任意姿态、完整工作空间上的通用抓取能力。
 
 ## 文档
 

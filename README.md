@@ -2,6 +2,8 @@
 
 This project builds a YAM Ultra 2 tabletop manipulation scene with Isaac Lab and Newton. The robot grasps a VBD deformable ball through physical fingertip contact and friction, then optionally returns it to the table or places it on a dynamic rigid block.
 
+The validated software baseline is Isaac Lab `v3.0.0-beta2.patch1` with Isaac Sim `6.0.1.0`, Python `3.12.14`, Newton `1.2.1`, and Warp `1.13.0`. See [`VERSIONS.md`](VERSIONS.md) for the complete environment record.
+
 [简体中文](README_zh-CN.md)
 
 ## Current structure
@@ -71,6 +73,8 @@ and then filtered for table containment, minimum object separation, and transfer
 -m pip install -e source/yam_ultra_deformable_place
 ```
 
+Run the commands below from the repository root. They use the matching Isaac Lab launcher and its `env_isaaclab` Python environment.
+
 ## Run
 
 ### Reset and settling only
@@ -118,11 +122,29 @@ OMNI_KIT_ACCEPT_EULA=yes ACCEPT_EULA=Y \
 --pick-lift --place-on-block --episodes 3 --steps-per-episode 60 --lift-height 0.03 --seed 7
 ```
 
+For a large batch, increase `--episodes`, for example:
+
+```bash
+OMNI_KIT_ACCEPT_EULA=yes ACCEPT_EULA=Y \
+/home/lightwheel-laure/embodied_ai_learning/isaac_versions/new/IsaacLab-v3.0.0-beta2.patch1/isaaclab.sh \
+-p scripts/yam_pick_ball.py --visualizer none \
+--pick-lift --place-on-block --episodes 50 --steps-per-episode 60 \
+--motion-steps 240 --lift-height 0.03 --seed 7
+```
+
 `--motion-steps` is a time-scale baseline, not a fixed per-stage step count. The current script requires values `>=240`; use the named speed constants in the source when intentionally tuning motion speed.
+
+Each episode samples new object positions, resets the robot, block, and deformable ball, waits for settling, and runs the selected task. A recoverable task failure is reported as `EPISODE_FAILED` and the next episode starts automatically. The batch summary reports `complete_ok`, `failed`, `settle_ok`, `pick_ok`, and `placement_ok`. Numerical corruption such as NaN/Inf or a CUDA illegal-memory error stops the process because the simulator state cannot be trusted afterward.
 
 ## VS Code
 
-The repository launch/tasks configurations point task modes to `scripts/yam_pick_ball.py`. The default build task runs the GUI place-on-block mode. Asset conversion remains a separate utility task.
+The repository launch/tasks configurations point task modes to `scripts/yam_pick_ball.py`.
+
+- F5: `Task: Place ball on block GUI`, 3 episodes, with `--keep-open` after the batch;
+- Ctrl+Shift+B: the default build task, 50 GUI episodes, with `--keep-open` after the batch;
+- other launch/tasks entries cover reset/settle, pick/lift, gripper diagnostics, and asset conversion.
+
+If a GUI batch contains recoverable failures, the terminal continues to the next episode. After the final summary, close the GUI window manually.
 
 ## Asset regeneration
 
@@ -139,17 +161,17 @@ OMNI_KIT_ACCEPT_EULA=yes ACCEPT_EULA=Y \
 Useful terminal markers include:
 
 ```text
-GRIPPER_CHECK_OK
-QUICK_GRASP_OK
-YAM_DEFORMABLE_BALL_LIFT_OK
-YAM_DEFORMABLE_BALL_PUT_BACK_OK
-YAM_DEFORMABLE_BALL_ON_BLOCK_OK
+RUN_CONFIG
+EPISODE_START
 EPISODE_COMPLETE
+EPISODE_FAILED
 EPISODE_SUMMARY
-YAM_DEFORMABLE_TASK_INTEGRATION_OK
+RUN_SUCCESS
+RUN_COMPLETE
+GRASP_FAILURE
 ```
 
-A success marker means the requested scripted mode passed its configured geometric, motion, support, settling, and lift/placement checks. It is not evidence of general-purpose grasping across arbitrary objects or the full robot workspace.
+`EPISODE_COMPLETE` means that episode passed its configured validation checks. `RUN_SUCCESS` means every requested episode completed. `RUN_COMPLETE` means the batch finished while one or more recoverable episodes failed; inspect each `EPISODE_FAILED` line and the summary counts. `GRASP_FAILURE` indicates a top-level fatal exception. Passing these scripted checks is not evidence of general-purpose grasping across arbitrary objects or the full robot workspace.
 
 ## Documentation
 

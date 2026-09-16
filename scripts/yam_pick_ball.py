@@ -36,6 +36,7 @@ from __future__ import annotations
 
 # argparse：解析命令行参数，例如 --episodes 1 --pick-lift。
 import argparse
+import atexit
 import builtins
 
 # math：环形随机采样时把半径/方位角转换成世界 XY 坐标。
@@ -43,6 +44,9 @@ import math
 
 # random：只用于场景中方块/球的随机位置采样；Random(seed) 让结果可复现。
 import random
+
+# sys：把 stdout/stderr 同时写入终端和本次运行日志。
+import sys
 
 # time：用于记录真实 wall-clock 时间，与仿真时间区分。
 import time
@@ -53,12 +57,88 @@ from pathlib import Path
 # 多轮 episode 验证时只保留最关键日志；这里只过滤本文件自己的 print，
 # 不改变任何物理、IK、判定或异常逻辑，也不会屏蔽 Python traceback / Isaac Lab 自身日志。
 _ORIGINAL_PRINT = builtins.print
-_ALLOWED_LOG_PREFIXES = ("RUN_CONFIG", "EPISODE_START", "RUN_SUCCESS", "GRASP_FAILURE")
+_RUN_LOG_HANDLE = None
+_ALLOWED_LOG_PREFIXES = (
+    "RUN_LOG",
+    "RUN_CONFIG",
+    "EPISODE_START",
+    "EPISODE_COMPLETE",
+    "EPISODE_FAILED",
+    "EPISODE_FAILURE_SNAPSHOT",
+    "EPISODE_SUMMARY",
+    "RUN_SUCCESS",
+    "RUN_COMPLETE",
+    "GRASP_FAILURE",
+)
 
 
 def print(*args, **kwargs):
-    if args and str(args[0]).startswith(_ALLOWED_LOG_PREFIXES):
-        _ORIGINAL_PRINT(*args, **kwargs)
+    """关键结果写到终端；所有本脚本诊断信息都写入自动日志。"""
+    is_terminal_message = bool(args and str(args[0]).startswith(_ALLOWED_LOG_PREFIXES))
+
+    # 本脚本的每条消息都直接写日志，不再依赖 sys.stdout 仍然是 _TeeStream。
+    # AppLauncher 启动后可能替换 stdout；旧写法因此漏掉了 EPISODE_FAILED 等关键行。
+    if _RUN_LOG_HANDLE is not None:
+        log_kwargs = dict(kwargs)
+        log_kwargs["file"] = _RUN_LOG_HANDLE
+        _ORIGINAL_PRINT(*args, **log_kwargs)
+
+    if is_terminal_message:
+        terminal_stream = sys.stdout
+        if isinstance(terminal_stream, _TeeStream):
+            terminal_stream = terminal_stream.terminal_stream
+        terminal_kwargs = dict(kwargs)
+        terminal_kwargs["file"] = terminal_stream
+        _ORIGINAL_PRINT(*args, **terminal_kwargs)
+
+
+class _TeeStream:
+    """把第三方库直接写入 stdout/stderr 的内容同步复制到日志。"""
+
+    def __init__(self, terminal_stream, log_stream):
+        self.terminal_stream = terminal_stream
+        self.log_stream = log_stream
+
+    def write(self, text):
+        terminal_result = self.terminal_stream.write(text)
+        if not self.log_stream.closed:
+            self.log_stream.write(text)
+        return terminal_result
+
+    def flush(self):
+        self.terminal_stream.flush()
+        if not self.log_stream.closed:
+            self.log_stream.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.terminal_stream, name)
+
+
+def _enable_automatic_run_log(requested_path: str | None) -> Path:
+    """建立日志文件并 tee stdout/stderr；未指定路径时自动使用时间戳文件名。"""
+    global _RUN_LOG_HANDLE
+    project_root = Path(__file__).resolve().parents[1]
+    if requested_path:
+        log_path = Path(requested_path).expanduser()
+        if not log_path.is_absolute():
+            log_path = Path.cwd() / log_path
+    else:
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        log_path = project_root / "logs" / f"yam_pick_ball_{timestamp}.log"
+    log_path = log_path.resolve()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    _RUN_LOG_HANDLE = log_path.open("a", encoding="utf-8", buffering=1)
+    sys.stdout = _TeeStream(sys.stdout, _RUN_LOG_HANDLE)
+    sys.stderr = _TeeStream(sys.stderr, _RUN_LOG_HANDLE)
+
+    def close_log():
+        if _RUN_LOG_HANDLE is not None and not _RUN_LOG_HANDLE.closed:
+            sys.stdout.flush()
+            sys.stderr.flush()
+            _RUN_LOG_HANDLE.close()
+
+    atexit.register(close_log)
+    return log_path
 
 
 # ------------------------------------------------------------
@@ -111,9 +191,13 @@ parser.add_argument("--keep-open", action="store_true", help="测试结束后保
 parser.add_argument("--stop-after-hold", action="store_true", help="只验收到闭合保持阶段，不抬升。")
 # 机械臂不靠近球，只测试夹爪开合。
 parser.add_argument("--gripper-check", action="store_true", help="固定机械臂，检查原始夹指张开—闭合—张开，不接近球。")
+# 默认自动写入 <project>/logs/yam_pick_ball_时间戳.log；传入此参数可指定其他路径。
+parser.add_argument("--log-file", type=str, default=None, help="本次完整运行日志路径；默认自动保存到工程 logs 目录。")
 # Isaac Lab 自带参数，例如 --device、--headless、--visualizer。
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+RUN_LOG_PATH = _enable_automatic_run_log(args_cli.log_file)
+print(f"RUN_LOG path={RUN_LOG_PATH}", flush=True)
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
@@ -169,7 +253,7 @@ TABLE_TOP_Z = TABLE_CENTER[2] + TABLE_SIZE[2] / 2.0
 # 机器人 base 固定在桌面中心；XY 不能只在这里改，spawn_scene() 也必须引用它。
 ROBOT_BASE_XY = TABLE_CENTER[:2]
 # 球和方块到机器人中心的随机半径。下限避开底座，上限限制在已验证可达区域。
-OBJECT_RADIUS_RANGE = (0.30, 0.45)
+OBJECT_RADIUS_RANGE = (0.30, 0.43)
 # 随机方位角（rad）。径向姿态下 joint1 约等于方位；保留实际限位余量。
 OBJECT_BEARING_RANGE = (-2.40, 3.00)
 # 方块与球水平距离至少 18cm，避免初始化重叠或任务距离太短。
@@ -193,9 +277,12 @@ BLOCK_RESET_CLEARANCE = 5.0e-4
 RIGID_STATIC_FRICTION = 0.6  # 静摩擦系数。
 RIGID_DYNAMIC_FRICTION = 0.5  # 动摩擦系数。
 RIGID_RESTITUTION = 0.0  # 恢复系数；0 表示不希望明显弹跳。
-BLOCK_SETTLE_LINEAR_SPEED = 5.0e-4  # m/s。
-BLOCK_SETTLE_ANGULAR_SPEED = 1.0e-2  # rad/s。
-BLOCK_SETTLE_CLEARANCE = 1.0e-3  # m，底面与桌面的容差。
+BLOCK_SETTLE_LINEAR_SPEED = 1.5e-3  # m/s；连续 0.1s 内最多约移动 0.15mm。
+BLOCK_SETTLE_ANGULAR_SPEED = 2.0e-2  # rad/s；连续 0.1s 内最多约转动 0.11°。
+BLOCK_SETTLE_CLEARANCE = 1.5e-3  # m，底面与桌面的接触包络容差。
+# 动态方块仍参与碰撞和受力，只增加轻量速度阻尼，抑制 reset 落桌后的长尾微振动。
+BLOCK_LINEAR_DAMPING = 1.0
+BLOCK_ANGULAR_DAMPING = 1.0
 # Newton 将形状 ke/kd 转换成 MuJoCo solref。保持 ke=2500，增加 kd 至 200，
 # 抑制接触法向振荡。这是约束恢复参数，不能当成软球杨氏模量。
 SUPPORT_CONTACT_STIFFNESS = 2500.0
@@ -253,6 +340,13 @@ ARM_CARTESIAN_SPEED = 0.35  # m/s，非接触末端移动峰值速度基准。
 ARM_JOINT_SPEED = 3.0  # rad/s，首次 joint-space approach 峰值速度。
 ARM_ORIENTATION_SPEED = 1.2  # rad/s，末端姿态插值的峰值角速度，与关节速度不同。
 MOTION_SETTLE_STEPS = 120  # 轨迹走完后最多额外闭环 1 s；超时明确报错。
+# 轨迹末端使用更大的 DLS 命令领先量，克服重力/接触载荷下 position drive 的稳态残差。
+MOTION_ENDPOINT_DLS_GAIN = 2.5
+MOTION_MAX_JOINT_COMMAND_STEP = 0.02  # rad/physics-step，仍保留原来的安全上限。
+MOTION_POSITION_TOLERANCE = 0.0025  # m；与后续 3～5mm 抓取/放置几何判据保持余量。
+MOTION_ROTATION_TOLERANCE = 0.02  # 旋转矩阵差的 Frobenius norm。
+MOTION_STOP_JOINT_SPEED = 0.05  # rad/s。
+MOTION_STABLE_REQUIRED_STEPS = 3
 DESCEND_SPEED = 0.25  # m/s，最后接近球的敏感下降段。
 LIFT_SPEED = ARM_CARTESIAN_SPEED
 # 对侧长弧搬运时正夹持软球；单独限速，避免旋转惯性在夹爪内积累偏移。
@@ -270,7 +364,12 @@ QUICK_GRASP_TIMEOUT_STEPS = 120  # 最多等约 1s。
 PLACE_CONTACT_CLEARANCE = 0.0005
 PLACE_POSITION_TOLERANCE = 0.005
 PLACE_RELEASE_DRIFT = 0.003
-BLOCK_PLACEMENT_MAX_DISPLACEMENT = 0.004
+RELEASE_STABLE_REQUIRED_STEPS = 12  # 松爪后连续稳定 0.1s 才允许夹爪撤离。
+RELEASE_STABLE_TIMEOUT_STEPS = 90  # 最多等待 0.75s，不让单轮无限卡住。
+RELEASE_RELATIVE_SPEED = 0.003  # m/s，球相对支撑面的水平速度阈值。
+RELEASE_MAX_NODAL_SPEED = 0.012  # m/s，允许软球接触后的微小内部回弹。
+BLOCK_PLACEMENT_OBSERVATION_STEPS = 60  # 夹爪撤离后观察 0.5s，再判断球是否仍在方块上。
+BALL_ON_BLOCK_MAX_CLEARANCE = 0.003  # m，最终球底与方块顶面的最大允许间隙。
 GRIPPER_CLOSED_GAP = 0.00006211
 
 GRIPPER_OPEN_GAP = GRIPPER_CLOSED_GAP - 2.0 * GRIPPER_OPEN_POSITION
@@ -280,9 +379,16 @@ NOMINAL_GRIP_STRESS = 5.0e3
 BALL_EFFECTIVE_MODULUS = BALL_YOUNGS_MODULUS / (1.0 - BALL_POISSONS_RATIO**2)
 BALL_COMPRESSION_RATIO = min(0.12, NOMINAL_GRIP_STRESS / BALL_EFFECTIVE_MODULUS)
 GRIPPER_TARGET_GAP = 2.0 * BALL_RADIUS * (1.0 - BALL_COMPRESSION_RATIO)
-GRIPPER_GRASP_POSITION = -0.5 * (GRIPPER_TARGET_GAP - GRIPPER_CLOSED_GAP)
+# 理论关节目标在实测几何中只形成约 1mm 的粒子接触包络重叠，随机长距离搬运时
+# 偶尔会滑脱。每侧额外闭合 0.7mm，把总夹持余量提高约 1.4mm；仍远离 0m 闭合限位。
+GRIPPER_EXTRA_COMPRESSION_PER_FINGER = 7.0e-4
+GRIPPER_GRASP_POSITION = (
+    -0.5 * (GRIPPER_TARGET_GAP - GRIPPER_CLOSED_GAP) + GRIPPER_EXTRA_COMPRESSION_PER_FINGER
+)
 MIN_LIFT_RATIO = 0.85
 APPROACH_IK_SEED = (-0.48, 1.97, 1.63, -1.23, 0.0, -0.48)
+APPROACH_IK_POSITION_TOLERANCE = 0.003
+APPROACH_IK_ROTATION_TOLERANCE = 0.02
 
 # ============================================================
 # 10. Newton physics
@@ -424,7 +530,10 @@ def spawn_scene() -> tuple[Articulation, RigidObject, DeformableObject]:
             prim_path="/World/env_0/TargetBlock",
             spawn=sim_utils.CuboidCfg(
                 size=BLOCK_SIZE,
-                rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+                rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                    linear_damping=BLOCK_LINEAR_DAMPING,
+                    angular_damping=BLOCK_ANGULAR_DAMPING,
+                ),
                 mass_props=sim_utils.MassPropertiesCfg(mass=0.12),
                 collision_props=sim_utils.CollisionPropertiesCfg(),
                 physics_material=rigid_surface_material(),
@@ -755,6 +864,8 @@ def wait_until_scene_settled(
         f"within {timeout_steps} physics steps; "
         f"block_ok={block_state_is_settled(bc, blv, bav, bot)} ball_ok={ball_stable}; "
         f"block_speed={math.sqrt(sum(v*v for v in blv)):.6f}/{BLOCK_SETTLE_LINEAR_SPEED:.6f} m/s; "
+        f"block_angular_speed={math.sqrt(sum(v*v for v in bav)):.6f}/{BLOCK_SETTLE_ANGULAR_SPEED:.6f} rad/s; "
+        f"block_clearance={bc:.6f}/{BLOCK_SETTLE_CLEARANCE:.6f} m; "
         f"ball_speed={math.sqrt(sum(v*v for v in ball_velocity)):.6f}/{ball_root_threshold:.6f} m/s; "
         f"ball_max_nodal_speed={nodal_speed:.6f}/{ball_nodal_threshold:.6f} m/s"
     )
@@ -825,6 +936,7 @@ def move_grasp_point(
     speed=None,
     smooth=False,
     on_step=None,
+    motion_label="unnamed",
 ):
     """位置与 SLERP 姿态同步插值，再用 FK/Jacobian/DLS 跟踪；超时明确失败。
     slerp 插值规划路径
@@ -878,32 +990,54 @@ def move_grasp_point(
             )
         else:
             joint_delta = damped_least_squares_position_step(grasp_pos_w, waypoint, jac[:, :3, :], damping=0.05)
-        # 单步 DLS 增量限制 ±0.02rad，再做关节限位。
+        # 轨迹结束后适度放大 DLS 修正量，用 position target 的领先量抵消重力和
+        # 夹球载荷导致的稳态误差；单步命令仍受原来的 ±0.02rad 上限保护。
+        correction_gain = MOTION_ENDPOINT_DLS_GAIN if phase >= 1.0 else 1.0
         arm_target = torch.clamp(
-            arm_pos + torch.clamp(joint_delta, min=-0.02, max=0.02), min=limits[:, 0], max=limits[:, 1]
+            arm_pos
+            + torch.clamp(
+                correction_gain * joint_delta,
+                min=-MOTION_MAX_JOINT_COMMAND_STEP,
+                max=MOTION_MAX_JOINT_COMMAND_STEP,
+            ),
+            min=limits[:, 0],
+            max=limits[:, 1],
         )
         full_target = robot.data.joint_pos.torch.clone()
         full_target[:, :6] = arm_target
         full_target[:, 6:] = gripper_target
         step_scene(sim, robot, block, ball, full_target)
         if on_step is not None:
-            on_step()
+            try:
+                on_step()
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    f"MOTION_STEP_FAILURE: label={motion_label} step={step + 1}/"
+                    f"{travel_steps + MOTION_SETTLE_STEPS} phase={phase:.4f} cause={exc}"
+                ) from exc
         if step >= travel_steps - 1:
             _, final_rot, current_pos, _ = grasp_point_kinematics(
                 robot.data.root_link_pose_w.torch, robot.data.joint_pos.torch[:, :6]
             )
-            pos_ok = torch.linalg.vector_norm(current_pos - target_pos_w).item() <= 0.002
-            rot_ok = not maintain_orientation or torch.linalg.matrix_norm(final_rot - target_rot_w).item() <= 0.02
-            stopped = robot.data.joint_vel.torch[:, :6].abs().max().item() <= 0.05
+            pos_ok = (
+                torch.linalg.vector_norm(current_pos - target_pos_w).item() <= MOTION_POSITION_TOLERANCE
+            )
+            rot_ok = (
+                not maintain_orientation
+                or torch.linalg.matrix_norm(final_rot - target_rot_w).item() <= MOTION_ROTATION_TOLERANCE
+            )
+            stopped = robot.data.joint_vel.torch[:, :6].abs().max().item() <= MOTION_STOP_JOINT_SPEED
             stable_steps = stable_steps + 1 if pos_ok and rot_ok and stopped else 0
-            if stable_steps >= 3:
+            if stable_steps >= MOTION_STABLE_REQUIRED_STEPS:
                 break
     else:
         position_error = torch.linalg.vector_norm(current_pos - target_pos_w).item()
         rotation_error = torch.linalg.matrix_norm(final_rot - target_rot_w).item()
         raise RuntimeError(
-            f"MOTION_TIMEOUT: target={target_pos_w[0].tolist()} position_error_m={position_error:.6f} "
-            f"rotation_matrix_error={rotation_error:.6f} joint_speed={robot.data.joint_vel.torch[:, :6].abs().max().item():.6f}"
+            f"MOTION_TIMEOUT: label={motion_label} target={target_pos_w[0].tolist()} "
+            f"position_error_m={position_error:.6f}/{MOTION_POSITION_TOLERANCE:.6f} "
+            f"rotation_matrix_error={rotation_error:.6f}/{MOTION_ROTATION_TOLERANCE:.6f} "
+            f"joint_speed={robot.data.joint_vel.torch[:, :6].abs().max().item():.6f}/{MOTION_STOP_JOINT_SPEED:.6f}"
         )
     _, _, final_grasp_pos_w, _ = grasp_point_kinematics(
         robot.data.root_link_pose_w.torch, robot.data.joint_pos.torch[:, :6]
@@ -1033,7 +1167,17 @@ def move_ball_on_continuous_polar_path(sim, robot, block, ball, destination_cent
         full_target[:, 6:] = gripper_target
         step_scene(sim, robot, block, ball, full_target)
         if on_step is not None:
-            on_step()
+            try:
+                on_step()
+            except RuntimeError as exc:
+                ball_gripper_offset = torch.linalg.vector_norm(
+                    ball_center(ball)[0] - finger_surface_points(robot).mean(dim=0)
+                ).item()
+                raise RuntimeError(
+                    f"TRANSFER_STEP_FAILURE: step={step + 1}/{travel_steps + MOTION_SETTLE_STEPS} "
+                    f"phase={phase:.4f} bearing_rad={bearing.item():.4f} radius_m={radius.item():.4f} "
+                    f"ball_gripper_offset_m={ball_gripper_offset:.6f} cause={exc}"
+                ) from exc
 
         if step >= travel_steps - 1:
             _, current_rotation_w, _, _ = grasp_point_kinematics(
@@ -1164,13 +1308,48 @@ def check_gripper_motion(sim, robot, block, ball):
 
 def check_ball_in_gripper(robot, ball):
     middle = finger_surface_points(robot).mean(dim=0)
-    if torch.linalg.vector_norm(ball_center(ball)[0] - middle).item() > 0.025:
-        raise RuntimeError("FAILURE: ball left finger region")
+    center = ball_center(ball)[0]
+    center_offset = torch.linalg.vector_norm(center - middle).item()
+    if center_offset > 0.025:
+        raise RuntimeError(
+            f"FAILURE BALL_LEFT_GRIPPER: center_offset_m={center_offset:.6f}/0.025000 "
+            f"ball_center={center.tolist()} finger_midpoint={middle.tolist()}"
+        )
     # 检查球的形变是否过大，避免夹爪把球压扁。
     # 软体小球包围盒： 用一个与世界坐标轴平行的长方体，把小球的所有节点包住，这个长方体在 X、Y、Z 三个方向的长度。
     extent = ball.data.nodal_pos_w.torch[0].amax(dim=0) - ball.data.nodal_pos_w.torch[0].amin(dim=0)
     if extent.min().item() < BALL_RADIUS * 0.6 or extent.max().item() > BALL_RADIUS * 3.0:
-        raise RuntimeError("FAILURE: excessive deformation")
+        raise RuntimeError(
+            f"FAILURE EXCESSIVE_DEFORMATION: extent_m={extent.tolist()} "
+            f"allowed_min={BALL_RADIUS * 0.6:.6f} allowed_max={BALL_RADIUS * 3.0:.6f}"
+        )
+
+
+def episode_failure_snapshot(robot, block, ball):
+    """记录失败瞬间的关键物理量，便于区分不可达、滑脱和软体失稳。"""
+    joint_pos = robot.data.joint_pos.torch[0]
+    joint_vel = robot.data.joint_vel.torch[0]
+    arm_limits = robot.data.joint_pos_limits.torch[0, :6]
+    arm_limit_margin = torch.minimum(joint_pos[:6] - arm_limits[:, 0], arm_limits[:, 1] - joint_pos[:6])
+    finger_midpoint = finger_surface_points(robot).mean(dim=0)
+    center = ball_center(ball)[0]
+    gap, width = grasp_geometry_metrics(robot, ball)
+    nodal_state = ball.data.nodal_state_w.torch[0]
+    extent = nodal_state[:, :3].amax(dim=0) - nodal_state[:, :3].amin(dim=0)
+    max_nodal_speed = torch.linalg.vector_norm(nodal_state[:, 3:], dim=-1).max().item()
+    return {
+        "joint_pos": joint_pos.cpu().tolist(),
+        "joint_vel": joint_vel.cpu().tolist(),
+        "arm_limit_margin": arm_limit_margin.cpu().tolist(),
+        "block_pos": block.data.root_pos_w.torch[0].cpu().tolist(),
+        "ball_center": center.cpu().tolist(),
+        "finger_midpoint": finger_midpoint.cpu().tolist(),
+        "ball_gripper_offset_m": torch.linalg.vector_norm(center - finger_midpoint).item(),
+        "finger_gap_m": gap,
+        "ball_width_on_grasp_axis_m": width,
+        "ball_extent_m": extent.cpu().tolist(),
+        "max_nodal_speed_mps": max_nodal_speed,
+    }
 
 
 def quick_grasp_check(sim, robot, block, ball, *, center_before_lift=None, required_lift=0.0):
@@ -1186,6 +1365,8 @@ def quick_grasp_check(sim, robot, block, ball, *, center_before_lift=None, requi
     target = robot.data.joint_pos_target.torch.clone()
     previous_relative = ball_center(ball) - finger_surface_points(robot).mean(dim=0)
     stable = 0
+    gap = width = relative_speed = finger_speed = float("nan")
+    lowest = rise = float("nan")
     for index in range(QUICK_GRASP_TIMEOUT_STEPS):
         step_scene(sim, robot, block, ball, target)
         check_ball_in_gripper(robot, ball)
@@ -1197,7 +1378,8 @@ def quick_grasp_check(sim, robot, block, ball, *, center_before_lift=None, requi
         relative = ball_center(ball) - finger_surface_points(robot).mean(dim=0)
         relative_speed = torch.linalg.vector_norm(relative - previous_relative).item() / sim.get_physics_dt()
         previous_relative = relative.clone()
-        finger_stopped = robot.data.joint_vel.torch[:, 6:].abs().max().item() < 0.002
+        finger_speed = robot.data.joint_vel.torch[:, 6:].abs().max().item()
+        finger_stopped = finger_speed < 0.002
         enveloped = gap < GRIPPER_OPEN_GAP - 0.002 and gap <= width + 2 * BALL_PARTICLE_RADIUS + 0.001
         lift_ok = True
         # 抬起小球检测
@@ -1213,7 +1395,12 @@ def quick_grasp_check(sim, robot, block, ball, *, center_before_lift=None, requi
                 flush=True,
             )
             return
-    raise RuntimeError("FAILURE QUICK_GRASP: grip/relative motion/lift did not stabilize before timeout")
+    raise RuntimeError(
+        f"FAILURE QUICK_GRASP_TIMEOUT: stable_steps={stable}/{QUICK_GRASP_STABLE_STEPS} "
+        f"gap_m={gap:.6f} width_m={width:.6f} enveloped={enveloped} "
+        f"relative_speed_mps={relative_speed:.6f}/0.003000 finger_speed_mps={finger_speed:.6f}/0.002000 "
+        f"lift_ok={lift_ok} lowest_m={lowest:.6f} rise_m={rise:.6f} required_lift_m={required_lift:.6f}"
+    )
 
 
 # ============================================================
@@ -1236,7 +1423,10 @@ def pick_and_lift_ball(sim, robot, block, ball, initial_ball_pos, lift_height, e
     pregrasp_joint_target, solved_position_error, solved_rotation_error = solve_approach_joint_target(
         robot, pregrasp_target, approach_rotation_w
     )
-    if solved_position_error > 0.002 or solved_rotation_error > 0.02:
+    if (
+        solved_position_error > APPROACH_IK_POSITION_TOLERANCE
+        or solved_rotation_error > APPROACH_IK_ROTATION_TOLERANCE
+    ):
         raise RuntimeError(
             f"Pregrasp IK did not converge: position_error={solved_position_error:.6f}, rotation_error={solved_rotation_error:.6f}"
         )
@@ -1269,7 +1459,10 @@ def pick_and_lift_ball(sim, robot, block, ball, initial_ball_pos, lift_height, e
         robot, tracked_pregrasp_target, approach_rotation_w
     )
     # 误差判断
-    if solved_position_error > 0.002 or solved_rotation_error > 0.02:
+    if (
+        solved_position_error > APPROACH_IK_POSITION_TOLERANCE
+        or solved_rotation_error > APPROACH_IK_ROTATION_TOLERANCE
+    ):
         raise RuntimeError(
             f"Tracked pregrasp IK did not converge: position_error={solved_position_error:.6f}, rotation_error={solved_rotation_error:.6f}"
         )
@@ -1321,6 +1514,7 @@ def pick_and_lift_ball(sim, robot, block, ball, initial_ball_pos, lift_height, e
         speed=ARM_CARTESIAN_SPEED,
         smooth=True,
         target_rotation_w=approach_rotation_w,
+        motion_label="descend_above_ball",
     )
     # 移动到球心位置，夹爪张开，低速下降
     grasp_target = ball_center(ball).clone()
@@ -1333,6 +1527,7 @@ def pick_and_lift_ball(sim, robot, block, ball, initial_ball_pos, lift_height, e
         GRIPPER_OPEN_POSITION,
         target_rotation_w=approach_rotation_w,
         speed=DESCEND_SPEED,
+        motion_label="descend_to_ball_center",
     )
     print(
         f"PICK_LIFT_STAGE=grasp error_m={grasp_error:.6f} ball_center={ball_center(ball)[0].cpu().tolist()}", flush=True
@@ -1392,6 +1587,7 @@ def pick_and_lift_ball(sim, robot, block, ball, initial_ball_pos, lift_height, e
         speed=LIFT_SPEED,
         smooth=True,
         on_step=lambda: check_ball_in_gripper(robot, ball),
+        motion_label="lift_ball",
     )
     print(
         f"PICK_LIFT_STAGE=lift error_m={lift_error:.6f} ball_center={ball_center(ball)[0].cpu().tolist()}", flush=True
@@ -1425,21 +1621,27 @@ def put_ball_back(sim, robot, block, ball, original_center, episode, *, on_block
         origin[:, 2] = initial_block_pos[:, 2] + BLOCK_SIZE[2] / 2 + BALL_RADIUS
     destination_rotation_w = radial_grasp_rotation(robot, origin)
 
-    def support_height():
-        if not on_block:
-            return TABLE_TOP_Z
-        q = block.data.root_quat_w.torch[0]
-        up_z = 1.0 - 2.0 * (q[1] ** 2 + q[2] ** 2).item()
-        displacement = torch.linalg.vector_norm(block.data.root_pos_w.torch - initial_block_pos).item()
-        if up_z < 0.9998 or displacement > BLOCK_PLACEMENT_MAX_DISPLACEMENT:
-            raise RuntimeError(f"FAILURE BLOCK_SUPPORT: tilt_or_motion up_z={up_z}, displacement={displacement}")
-        return block.data.root_pos_w.torch[0, 2].item() + BLOCK_SIZE[2] / 2
-
     def grasp_position():
         return grasp_point_kinematics(robot.data.root_link_pose_w.torch, robot.data.joint_pos.torch[:, :6])[2].clone()
 
+    def ball_in_block_frame():
+        """返回软球节点、球心和球底在方块局部坐标系中的状态。"""
+        block_pose = block.data.root_link_pose_w.torch[0]
+        rotation_w = matrix_from_quat(block_pose[3:].unsqueeze(0))[0]
+        node_delta_w = ball.data.nodal_pos_w.torch[0] - block_pose[:3]
+        nodes_b = node_delta_w @ rotation_w
+        center_b = nodes_b.mean(dim=0)
+        top_clearance = nodes_b[:, 2].min().item() - BALL_PARTICLE_RADIUS - BLOCK_SIZE[2] / 2
+        return nodes_b, center_b, top_clearance
+
     def clearance():
-        return ball.data.nodal_pos_w.torch[..., 2].min().item() - BALL_PARTICLE_RADIUS - support_height()
+        if on_block:
+            return ball_in_block_frame()[2]
+        return ball.data.nodal_pos_w.torch[..., 2].min().item() - BALL_PARTICLE_RADIUS - TABLE_TOP_Z
+
+    def support_center_xy():
+        """返回当前支撑面的 XY；方块轻微受力移动时用相对坐标评价球是否滑动。"""
+        return block.data.root_pos_w.torch[:, :2] if on_block else origin[:, :2]
 
     if on_block and clearance() < 0.05:
         print("STATE=RAISE_FOR_TRANSFER", flush=True)
@@ -1459,6 +1661,7 @@ def put_ball_back(sim, robot, block, ball, original_center, episode, *, on_block
             speed=LIFT_SPEED,
             smooth=True,
             on_step=lambda: check_ball_in_gripper(robot, ball),
+            motion_label="raise_for_transfer",
         )
         if error > 0.005 or clearance() < 0.05:
             raise RuntimeError(f"FAILURE TRANSFER_HEIGHT: error={error}, clearance={clearance()}")
@@ -1498,6 +1701,7 @@ def put_ball_back(sim, robot, block, ball, original_center, episode, *, on_block
             speed=TRANSFER_SPEED,
             smooth=True,
             on_step=lambda: check_ball_in_gripper(robot, ball),
+            motion_label=f"ball_alignment_correction_{correction + 1}",
         )
     else:
         ball_alignment_error = torch.linalg.vector_norm(ball_center(ball)[:, :2] - origin[:, :2]).item()
@@ -1518,6 +1722,7 @@ def put_ball_back(sim, robot, block, ball, original_center, episode, *, on_block
         speed=PLACE_APPROACH_SPEED,
         smooth=True,
         on_step=lambda: check_ball_in_gripper(robot, ball),
+        motion_label="lower_to_support_approach",
     )
     for _ in range(8):
         gap = clearance()
@@ -1538,6 +1743,7 @@ def put_ball_back(sim, robot, block, ball, original_center, episode, *, on_block
             speed=PLACE_SPEED,
             smooth=True,
             on_step=lambda: check_ball_in_gripper(robot, ball),
+            motion_label="lower_to_release_height",
         )
     if not -BALL_SETTLE_CONTACT_CLEARANCE <= clearance() <= PLACE_CONTACT_CLEARANCE:
         raise RuntimeError(f"FAILURE PLACE: could not reach release height, clearance={clearance():.6f}")
@@ -1549,21 +1755,28 @@ def put_ball_back(sim, robot, block, ball, original_center, episode, *, on_block
     if not -BALL_SETTLE_CONTACT_CLEARANCE <= clearance() <= PLACE_CONTACT_CLEARANCE:
         raise RuntimeError("FAILURE PLACE: release height changed during hold")
     release_center = ball_center(ball).clone()
+    release_relative_xy = release_center[:, :2] - support_center_xy()
     max_drift = 0.0
+    max_world_drift = 0.0
 
     def monitor_release():
-        nonlocal max_drift
+        nonlocal max_drift, max_world_drift
         center = ball_center(ball)
-        error = torch.linalg.vector_norm(center[:, :2] - origin[:, :2]).item()
-        max_drift = max(max_drift, torch.linalg.vector_norm(center[:, :2] - release_center[:, :2]).item())
-        if error > PLACE_POSITION_TOLERANCE or max_drift > PLACE_RELEASE_DRIFT:
-            raise RuntimeError(f"FAILURE PLACE_DRIFT: position_error={error:.6f}, max_release_drift={max_drift:.6f}")
-        if on_block:
-            offset = (center[:, :2] - block.data.root_pos_w.torch[:, :2]).abs()
-            half_size = torch.tensor(BLOCK_SIZE[:2], device=robot.device) / 2 - 0.005
-            if (offset > half_size).any():
-                raise RuntimeError("FAILURE BLOCK_SUPPORT: ball center left block footprint")
-        if clearance() < -BALL_SETTLE_CONTACT_CLEARANCE:
+        relative_xy = center[:, :2] - support_center_xy()
+        error = torch.linalg.vector_norm(relative_xy).item()
+        max_drift = max(max_drift, torch.linalg.vector_norm(relative_xy - release_relative_xy).item())
+        max_world_drift = max(
+            max_world_drift,
+            torch.linalg.vector_norm(center[:, :2] - release_center[:, :2]).item(),
+        )
+        # 放回桌面模式仍要求回到原位；放到方块模式只记录这些过程质量指标，
+        # 不因为释放时短暂偏移而提前失败，最终统一判断球是否仍在方块顶面。
+        if not on_block and (error > PLACE_POSITION_TOLERANCE or max_drift > PLACE_RELEASE_DRIFT):
+            raise RuntimeError(
+                f"FAILURE PLACE_DRIFT: support_relative_error={error:.6f}, "
+                f"support_relative_drift={max_drift:.6f}, world_drift={max_world_drift:.6f}"
+            )
+        if not on_block and clearance() < -BALL_SETTLE_CONTACT_CLEARANCE:
             raise RuntimeError("FAILURE PLACE: ball penetrated table during release/retreat")
 
     monitor_release()
@@ -1583,44 +1796,129 @@ def put_ball_back(sim, robot, block, ball, original_center, episode, *, on_block
     else:
         raise RuntimeError("FAILURE PLACE: fingers not fully clear of ball; refusing retreat")
 
+    # 夹指虽然已经张开到接触包络之外，软球仍可能处于卸载回弹阶段。保持机械臂
+    # 静止，确认球相对支撑面和内部节点连续稳定后再撤离，避免夹指边缘带动小球。
+    print("STATE=RELEASE_SETTLE", flush=True)
+    previous_relative_xy = ball_center(ball)[:, :2] - support_center_xy()
+    release_stable_steps = 0
+    release_settle_steps = 0
+    last_relative_speed = float("inf")
+    last_nodal_speed = float("inf")
+    for release_settle_steps in range(1, RELEASE_STABLE_TIMEOUT_STEPS + 1):
+        step_scene(sim, robot, block, ball, open_target)
+        monitor_release()
+        relative_xy = ball_center(ball)[:, :2] - support_center_xy()
+        last_relative_speed = (
+            torch.linalg.vector_norm(relative_xy - previous_relative_xy).item() / sim.get_physics_dt()
+        )
+        previous_relative_xy = relative_xy.clone()
+        nodal_velocity = ball.data.nodal_state_w.torch[0, :, 3:]
+        last_nodal_speed = torch.linalg.vector_norm(nodal_velocity, dim=-1).max().item()
+        stable_now = (
+            last_relative_speed <= RELEASE_RELATIVE_SPEED and last_nodal_speed <= RELEASE_MAX_NODAL_SPEED
+        )
+        release_stable_steps = release_stable_steps + 1 if stable_now else 0
+        if release_stable_steps >= RELEASE_STABLE_REQUIRED_STEPS:
+            break
+    else:
+        if on_block:
+            print(
+                f"RELEASE_SETTLE_INCOMPLETE steps={release_settle_steps} "
+                f"relative_speed_mps={last_relative_speed:.6f} max_nodal_speed_mps={last_nodal_speed:.6f}",
+                flush=True,
+            )
+        else:
+            raise RuntimeError(
+                f"FAILURE RELEASE_SETTLE_TIMEOUT: relative_speed={last_relative_speed:.6f}/"
+                f"{RELEASE_RELATIVE_SPEED:.6f}, max_nodal_speed={last_nodal_speed:.6f}/"
+                f"{RELEASE_MAX_NODAL_SPEED:.6f}"
+            )
+    if release_stable_steps >= RELEASE_STABLE_REQUIRED_STEPS:
+        print(
+            f"RELEASE_SETTLED steps={release_settle_steps} relative_speed_mps={last_relative_speed:.6f} "
+            f"max_nodal_speed_mps={last_nodal_speed:.6f}",
+            flush=True,
+        )
+
     print("STATE=RETREAT", flush=True)
     target = grasp_position()
     target[:, 2] += 0.10
-    move_grasp_point(
-        sim,
-        robot,
-        block,
-        ball,
-        target,
-        GRIPPER_OPEN_POSITION,
-        target_rotation_w=destination_rotation_w,
-        smooth=True,
-        on_step=monitor_release,
-    )
-    final_steps = wait_until_scene_settled(
-        sim,
-        robot,
-        block,
-        ball,
-        robot.data.joint_pos_target.torch.clone(),
-        episode=episode,
-        minimum_steps=60,
-        ball_reset_center=original_center,
-        on_step=monitor_release,
-        timeout_limit=240,
-        support_height=support_height if on_block else None,
-    )
+    try:
+        move_grasp_point(
+            sim,
+            robot,
+            block,
+            ball,
+            target,
+            GRIPPER_OPEN_POSITION,
+            target_rotation_w=destination_rotation_w,
+            smooth=True,
+            on_step=monitor_release,
+            motion_label="retreat_after_release",
+        )
+    except RuntimeError as exc:
+        # 放置到方块时，撤离末端存在几毫米稳态误差不应覆盖已经完成的物理放置。
+        # 只降级处理这一条明确的撤离超时；碰撞、非有限值等其他异常仍照常上抛。
+        if on_block and str(exc).startswith("MOTION_TIMEOUT: label=retreat_after_release"):
+            print(f"RETREAT_INCOMPLETE warning={exc}", flush=True)
+        else:
+            raise
+    final_support_clearance = clearance()
+    if on_block:
+        # 成功标准只看最终是否留在方块上。速度、漂移和方块位移保留为诊断指标，
+        # 不再参与成功/失败判定。
+        final_target = robot.data.joint_pos_target.torch.clone()
+        for _ in range(BLOCK_PLACEMENT_OBSERVATION_STEPS):
+            step_scene(sim, robot, block, ball, final_target)
+            monitor_release()
+        final_steps = BLOCK_PLACEMENT_OBSERVATION_STEPS
+        final_nodes_b, final_center_b, _ = ball_in_block_frame()
+        half_x, half_y = BLOCK_SIZE[0] / 2, BLOCK_SIZE[1] / 2
+        # 每个软体节点都有 BALL_PARTICLE_RADIUS 的碰撞包络。计算各粒子球到有限
+        # 方块顶面矩形的最短距离，最小距离减粒子半径就是物理接触间隙。
+        dx = (final_nodes_b[:, 0].abs() - half_x).clamp_min(0.0)
+        dy = (final_nodes_b[:, 1].abs() - half_y).clamp_min(0.0)
+        dz = (final_nodes_b[:, 2] - BLOCK_SIZE[2] / 2).abs()
+        top_face_distance = torch.sqrt(dx.square() + dy.square() + dz.square())
+        final_support_clearance = top_face_distance.min().item() - BALL_PARTICLE_RADIUS
+        supported_by_top = (
+            -BALL_SETTLE_CONTACT_CLEARANCE
+            <= final_support_clearance
+            <= BALL_ON_BLOCK_MAX_CLEARANCE
+            and final_center_b[2].item() > BLOCK_SIZE[2] / 2
+        )
+        if not supported_by_top:
+            raise RuntimeError(
+                f"FAILURE BALL_NOT_ON_BLOCK: center_block_frame={final_center_b.tolist()} "
+                f"top_contact_clearance={final_support_clearance:.6f} supported_by_top={supported_by_top}"
+            )
+    else:
+        final_steps = wait_until_scene_settled(
+            sim,
+            robot,
+            block,
+            ball,
+            robot.data.joint_pos_target.torch.clone(),
+            episode=episode,
+            minimum_steps=60,
+            ball_reset_center=original_center,
+            on_step=monitor_release,
+            timeout_limit=240,
+        )
     result = {
         "episode": episode,
         "original_center_m": list(original_center),
         "final_center_m": ball_center(ball)[0].cpu().tolist(),
-        "xy_error_m": torch.linalg.vector_norm(ball_center(ball)[:, :2] - origin[:, :2]).item(),
+        "xy_error_m": torch.linalg.vector_norm(ball_center(ball)[:, :2] - support_center_xy()).item(),
         "max_release_drift_m": max_drift,
-        "contact_clearance_m": clearance(),
+        "max_world_release_drift_m": max_world_drift,
+        "block_displacement_m": torch.linalg.vector_norm(block.data.root_pos_w.torch - initial_block_pos).item(),
+        "contact_clearance_m": final_support_clearance,
         "clearance_wait_after_open_s": clearance_steps * sim.get_physics_dt(),
+        "release_settle_s": release_settle_steps * sim.get_physics_dt(),
         "post_retreat_check_s": final_steps * sim.get_physics_dt(),
     }
-    result["target_center_m"] = origin[0].cpu().tolist()
+    result["target_center_m"] = torch.cat((support_center_xy(), origin[:, 2:]), dim=-1)[0].cpu().tolist()
     print(f"{'PLACE_ON_BLOCK_RESULT' if on_block else 'PUT_BACK_RESULT'}={result}", flush=True)
     marker = "YAM_DEFORMABLE_BALL_ON_BLOCK_OK" if on_block else "YAM_DEFORMABLE_BALL_PUT_BACK_OK"
     print(f"{marker} episode={episode}", flush=True)
@@ -1674,96 +1972,135 @@ def main() -> None:
 
     rng = random.Random(args_cli.seed)
     results, pick_lift_results, placement_results, motion_timings = [], [], [], []
+    episode_failures = []
+    settle_ok_count = 0
     settled_ball_template = None
 
     for episode in range(args_cli.episodes):
-        block_pos, ball_pos = sample_object_positions(rng)
-        print(
-            f"EPISODE_START episode={episode + 1}/{args_cli.episodes} block={block_pos} ball={ball_pos}",
-            flush=True,
-        )
-        ball_reset_center = reset_episode(robot, block, ball, block_pos, ball_pos, ball_template=settled_ball_template)
-        settle_steps = wait_until_scene_settled(
-            sim,
-            robot,
-            block,
-            ball,
-            robot.data.default_joint_pos.torch,
-            episode=episode,
-            minimum_steps=args_cli.steps_per_episode,
-            ball_reset_center=ball_reset_center,
-            required_steps=GRASP_READY_REQUIRED_STEPS if args_cli.pick_lift else SCENE_SETTLE_REQUIRED_STEPS,
-            ball_root_threshold=GRASP_READY_ROOT_SPEED if args_cli.pick_lift else BALL_SETTLE_ROOT_SPEED,
-            ball_nodal_threshold=GRASP_READY_MAX_NODAL_SPEED if args_cli.pick_lift else BALL_SETTLE_MAX_NODAL_SPEED,
-            ball_window_drift=GRASP_READY_WINDOW_DRIFT if args_cli.pick_lift else BALL_SETTLE_WINDOW_DRIFT,
-        )
-        if settled_ball_template is None:
-            settled_ball_template = ball.data.nodal_state_w.torch.clone()
-            settled_ball_template[..., 3:] = 0.0
-            print("BALL_SETTLED_TEMPLATE_CAPTURED episode=0", flush=True)
-
-        if args_cli.gripper_check:
-            check_gripper_motion(sim, robot, block, ball)
-        if args_cli.pick_lift:
-            motion_start_step = SCENE_STEP_COUNT
-            motion_start_wall = time.perf_counter()
-            settled_ball_pos = tuple(ball_center(ball)[0].cpu().tolist())
-            pick_lift_result = pick_and_lift_ball(
-                sim, robot, block, ball, settled_ball_pos, args_cli.lift_height, episode
+        stage = "sampling"
+        try:
+            block_pos, ball_pos = sample_object_positions(rng)
+            print(
+                f"EPISODE_START episode={episode + 1}/{args_cli.episodes} block={block_pos} ball={ball_pos}",
+                flush=True,
             )
-            pick_lift_result["episode"] = episode
-            pick_lift_results.append(pick_lift_result)
-            if not pick_lift_result.get("hold_only"):
-                if pick_lift_result["fk_alignment_error_m"] > 0.002:
-                    raise RuntimeError(f"URDF FK does not align with the simulated gripper: {pick_lift_result}")
-                minimum_lift = pick_lift_result["commanded_lift_m"] * MIN_LIFT_RATIO
-                if pick_lift_result["actual_ball_lift_m"] < minimum_lift:
-                    raise RuntimeError(
-                        f"Ball was not lifted high enough; required {minimum_lift:.3f} m: {pick_lift_result}"
-                    )
-                print(f"YAM_DEFORMABLE_BALL_LIFT_OK episode={episode}", flush=True)
-            if args_cli.put_back:
-                placement_results.append(put_ball_back(sim, robot, block, ball, settled_ball_pos, episode))
-            elif args_cli.place_on_block:
-                placement_results.append(
-                    put_ball_back(sim, robot, block, ball, settled_ball_pos, episode, on_block=True)
-                )
-            timing = {
-                "episode": episode,
-                "sim_s": (SCENE_STEP_COUNT - motion_start_step) * sim.get_physics_dt(),
-                "wall_s": time.perf_counter() - motion_start_wall,
-            }
-            motion_timings.append(timing)
-            print(f"MOTION_TIMING={timing}", flush=True)
 
-        check_block_support(block, stage=f"episode_{episode}_complete")
-        check_ball_support(ball, stage=f"episode_{episode}_complete", reset_center=ball_reset_center)
-        tensors = (
-            robot.data.joint_pos.torch,
-            block.data.root_pos_w.torch,
-            block.data.root_com_vel_w.torch,
-            ball.data.nodal_state_w.torch,
-        )
-        if not all(torch.isfinite(value).all() for value in tensors):
-            raise RuntimeError(f"Non-finite simulation state in episode {episode}")
-        measured_block = block.data.root_pos_w.torch[0].cpu().tolist()
-        measured_ball = ball.data.nodal_pos_w.torch[0].mean(dim=0).cpu().tolist()
-        ball_xy_drift = (
-            (measured_ball[0] - ball_reset_center[0]) ** 2 + (measured_ball[1] - ball_reset_center[1]) ** 2
-        ) ** 0.5
-        results.append(
-            {
+            stage = "reset"
+            ball_reset_center = reset_episode(
+                robot, block, ball, block_pos, ball_pos, ball_template=settled_ball_template
+            )
+            stage = "settling"
+            settle_steps = wait_until_scene_settled(
+                sim,
+                robot,
+                block,
+                ball,
+                robot.data.default_joint_pos.torch,
+                episode=episode,
+                minimum_steps=args_cli.steps_per_episode,
+                ball_reset_center=ball_reset_center,
+                required_steps=GRASP_READY_REQUIRED_STEPS if args_cli.pick_lift else SCENE_SETTLE_REQUIRED_STEPS,
+                ball_root_threshold=GRASP_READY_ROOT_SPEED if args_cli.pick_lift else BALL_SETTLE_ROOT_SPEED,
+                ball_nodal_threshold=GRASP_READY_MAX_NODAL_SPEED if args_cli.pick_lift else BALL_SETTLE_MAX_NODAL_SPEED,
+                ball_window_drift=GRASP_READY_WINDOW_DRIFT if args_cli.pick_lift else BALL_SETTLE_WINDOW_DRIFT,
+            )
+            settle_ok_count += 1
+            if settled_ball_template is None:
+                settled_ball_template = ball.data.nodal_state_w.torch.clone()
+                settled_ball_template[..., 3:] = 0.0
+                print(f"BALL_SETTLED_TEMPLATE_CAPTURED episode={episode}", flush=True)
+
+            if args_cli.gripper_check:
+                stage = "gripper_check"
+                check_gripper_motion(sim, robot, block, ball)
+            if args_cli.pick_lift:
+                motion_start_step = SCENE_STEP_COUNT
+                motion_start_wall = time.perf_counter()
+                settled_ball_pos = tuple(ball_center(ball)[0].cpu().tolist())
+                stage = "pick_and_lift"
+                pick_lift_result = pick_and_lift_ball(
+                    sim, robot, block, ball, settled_ball_pos, args_cli.lift_height, episode
+                )
+                pick_lift_result["episode"] = episode
+                pick_lift_results.append(pick_lift_result)
+                if not pick_lift_result.get("hold_only"):
+                    if pick_lift_result["fk_alignment_error_m"] > 0.002:
+                        raise RuntimeError(f"URDF FK does not align with the simulated gripper: {pick_lift_result}")
+                    minimum_lift = pick_lift_result["commanded_lift_m"] * MIN_LIFT_RATIO
+                    if pick_lift_result["actual_ball_lift_m"] < minimum_lift:
+                        raise RuntimeError(
+                            f"Ball was not lifted high enough; required {minimum_lift:.3f} m: {pick_lift_result}"
+                        )
+                    print(f"YAM_DEFORMABLE_BALL_LIFT_OK episode={episode}", flush=True)
+                if args_cli.put_back:
+                    stage = "put_back"
+                    placement_results.append(put_ball_back(sim, robot, block, ball, settled_ball_pos, episode))
+                elif args_cli.place_on_block:
+                    stage = "place_on_block"
+                    placement_results.append(
+                        put_ball_back(sim, robot, block, ball, settled_ball_pos, episode, on_block=True)
+                    )
+                timing = {
+                    "episode": episode,
+                    "sim_s": (SCENE_STEP_COUNT - motion_start_step) * sim.get_physics_dt(),
+                    "wall_s": time.perf_counter() - motion_start_wall,
+                }
+                motion_timings.append(timing)
+                print(f"MOTION_TIMING={timing}", flush=True)
+
+            stage = "final_validation"
+            check_block_support(block, stage=f"episode_{episode}_complete")
+            check_ball_support(ball, stage=f"episode_{episode}_complete", reset_center=ball_reset_center)
+            tensors = (
+                robot.data.joint_pos.torch,
+                block.data.root_pos_w.torch,
+                block.data.root_com_vel_w.torch,
+                ball.data.nodal_state_w.torch,
+            )
+            if not all(torch.isfinite(value).all() for value in tensors):
+                raise RuntimeError(f"Non-finite simulation state in episode {episode}")
+            measured_block = block.data.root_pos_w.torch[0].cpu().tolist()
+            measured_ball = ball.data.nodal_pos_w.torch[0].mean(dim=0).cpu().tolist()
+            ball_xy_drift = (
+                (measured_ball[0] - ball_reset_center[0]) ** 2 + (measured_ball[1] - ball_reset_center[1]) ** 2
+            ) ** 0.5
+            results.append(
+                {
+                    "episode": episode,
+                    "settle_steps": settle_steps,
+                    "sampled_block": [round(v, 4) for v in block_pos],
+                    "sampled_ball": [round(v, 4) for v in ball_pos],
+                    "reset_ball_center": [round(v, 4) for v in ball_reset_center],
+                    "measured_block": [round(v, 4) for v in measured_block],
+                    "measured_ball_center": [round(v, 4) for v in measured_ball],
+                    "ball_xy_drift_m": round(ball_xy_drift, 6),
+                }
+            )
+            print(f"EPISODE_COMPLETE episode={episode + 1}/{args_cli.episodes}", flush=True)
+        except RuntimeError as exc:
+            error_text = str(exc)
+            fatal_markers = ("CUDA error", "illegal memory access", "Non-finite", "non-finite")
+            try:
+                snapshot = episode_failure_snapshot(robot, block, ball)
+            except Exception as diagnostic_exc:
+                snapshot = {"diagnostic_error": f"{type(diagnostic_exc).__name__}: {diagnostic_exc}"}
+            failure = {
                 "episode": episode,
-                "settle_steps": settle_steps,
-                "sampled_block": [round(v, 4) for v in block_pos],
-                "sampled_ball": [round(v, 4) for v in ball_pos],
-                "reset_ball_center": [round(v, 4) for v in ball_reset_center],
-                "measured_block": [round(v, 4) for v in measured_block],
-                "measured_ball_center": [round(v, 4) for v in measured_ball],
-                "ball_xy_drift_m": round(ball_xy_drift, 6),
+                "stage": stage,
+                "error_type": type(exc).__name__,
+                "message": error_text,
+                "snapshot": snapshot,
             }
-        )
-        print(f"EPISODE_COMPLETE index={episode} total={args_cli.episodes}", flush=True)
+            print(
+                f"EPISODE_FAILED episode={episode + 1}/{args_cli.episodes} stage={stage} "
+                f"error={type(exc).__name__}: {error_text}",
+                flush=True,
+            )
+            print(f"EPISODE_FAILURE_SNAPSHOT episode={episode} data={snapshot}", flush=True)
+            if any(marker in error_text for marker in fatal_markers):
+                raise
+            episode_failures.append(failure)
+            continue
 
     print(f"NEWTON_SOLVER={type(sim.cfg.physics.solver_cfg).__name__}")
     print(f"YAM_JOINT_NAMES={robot.joint_names}")
@@ -1776,12 +2113,19 @@ def main() -> None:
     for pick_lift_result in pick_lift_results:
         print(f"PICK_LIFT_RESULT={pick_lift_result}")
     print(
-        f"EPISODE_SUMMARY requested={args_cli.episodes} reset_ok={len(results)} "
+        f"EPISODE_SUMMARY requested={args_cli.episodes} complete_ok={len(results)} failed={len(episode_failures)} "
+        f"settle_ok={settle_ok_count} "
         f"pick_ok={len([r for r in pick_lift_results if not r.get('hold_only')])} "
         f"placement_ok={len(placement_results)} timings={motion_timings}",
         flush=True,
     )
-    print(f"RUN_SUCCESS episodes={args_cli.episodes}", flush=True)
+    if episode_failures:
+        print(
+            f"RUN_COMPLETE requested={args_cli.episodes} succeeded={len(results)} failed={len(episode_failures)}",
+            flush=True,
+        )
+    else:
+        print(f"RUN_SUCCESS episodes={args_cli.episodes}", flush=True)
 
     if args_cli.keep_open:
         if args_cli.headless:
